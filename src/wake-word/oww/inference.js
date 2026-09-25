@@ -31,6 +31,7 @@ export const MEL_BINS = 32;
 export const MEL_WINDOW = 76;
 export const EMBEDDING_DIM = 96;
 export const EMBEDDING_WINDOW = 16;
+export const LIVE_HISTORY_CHUNKS = Math.ceil(MEL_WINDOW / 8) + EMBEDDING_WINDOW - 1;
 const MEL_PREFIX_SAMPLES = 160 * 3;
 const MEL_BUFFER_MAX = 970;
 
@@ -110,6 +111,7 @@ export class OwwInference {
     this._classifierEntries = Object.entries(classifiers);
     this._probOutput = {};
     this._lastTimings = null;
+    this._liveChunks = 0;
 
     // Audio history: last 480 samples, prepended to each new chunk so
     // the mel CNN can produce continuous STFT frames across the chunk
@@ -225,6 +227,7 @@ export class OwwInference {
    * exactly where we must not be running the mel + embedding pipeline.
    */
   reset() {
+    this._liveChunks = 0;
     this._audioHistory.fill(0);
     this._initMelBuffer();
     this._melState = this.melspec.createState();
@@ -397,6 +400,7 @@ export class OwwInference {
     // readback/upload in between.
     const emb = await this._runFrontend(this._melInput, timings);
     this._appendEmbedding(emb);
+    this._liveChunks++;
 
     // Stage 3: classify the latest 16 embeddings - only for active
     // classifiers.  Inactive ones are skipped entirely (no inference
@@ -407,6 +411,7 @@ export class OwwInference {
     }
     const classifyStart = timings ? nowMs() : 0;
     for (const [name, model] of this._classifierEntries) {
+      if (this._liveChunks < LIVE_HISTORY_CHUNKS) continue;
       if (activeKeywords && !activeKeywords.has(name)) continue;
       const out = model.invoke(this._classifierInput, { state: this._classifierStates[name] });
       probs[name] = out[0];

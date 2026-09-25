@@ -185,3 +185,67 @@ test('opening device settings preserves locally disabled auto-start while hydrat
   assert.equal(panel.saved.auto_start, false);
   assert.equal(panel._config.satellite_entity, kitchen.entity_id);
 });
+
+test('review choices autosave in order without replacing the controls or losing the second answer', async () => {
+  const f = await fixture(); await flush();
+  const clip = item('autosave');
+  let complete;
+  f.response.value = request => request.type.endsWith('/review_list') ? Promise.resolve(listing([clip]))
+    : new Promise(resolve => { complete = resolve; });
+  await f.panel.refresh();
+  const row = f.page.querySelectorAll('article')[0];
+  const [label, presence] = row.querySelectorAll('select');
+  label.value = 'false_trigger'; label.listeners.change();
+  assert.match(row.textContent, /Saving/);
+  presence.value = 'absent'; presence.listeners.change();
+  assert.equal(f.calls.filter(r => r.type.endsWith('/label')).length, 1);
+  complete({}); await flush();
+  const last = f.calls.at(-1);
+  assert.equal(last.label, 'false_trigger'); assert.equal(last.word_present, 'absent');
+  complete({}); await flush();
+  assert.equal(f.page.querySelectorAll('article')[0], row, 'Saving does not destroy playback or the edited row');
+  assert.match(row.textContent, /Saved/);
+  assert.equal(f.panel._items[0].word_present, 'absent');
+  assert.equal(find(row, 'button', 'Save review').disabled, true);
+});
+
+test('failed autosave keeps both answers through refresh, blocks stale export, and supports retry', async () => {
+  const f = await fixture(); await flush(); const clip = item('retry');
+  f.response.value = async request => {
+    if (request.type.endsWith('/review_list')) return listing([structuredClone(clip)]);
+    throw new Error('Connection lost');
+  };
+  await f.panel.refresh();
+  await f.panel._label(clip, 'false_trigger', 'absent');
+  await f.panel.refresh();
+  const row = f.page.querySelectorAll('article')[0];
+  assert.equal(row.querySelectorAll('select')[0].value, 'false_trigger');
+  assert.equal(row.querySelectorAll('select')[1].value, 'absent');
+  assert.match(row.textContent, /Not saved.*Connection lost/);
+  await f.panel._exportReviewedPage();
+  assert.equal(f.downloads.length, 0);
+  f.response.value = async request => request.type.endsWith('/label') ? {} : listing([clip]);
+  await find(f.page, 'button', 'Retry save').click(); await flush();
+  assert.match(f.page.querySelectorAll('article')[0].textContent, /Saved/);
+  assert.equal(f.calls.filter(r => r.type.endsWith('/label')).at(-1).word_present, 'absent');
+});
+
+test('a list begun before an edit cannot roll back its saved answers', async () => {
+  const f = await fixture(); await flush(); const clip = item('race');
+  f.response.value = async () => listing([structuredClone(clip)]); await f.panel.refresh();
+  let completeList;
+  f.response.value = request => request.type.endsWith('/review_list')
+    ? new Promise(resolve => { completeList = resolve; }) : Promise.resolve({});
+  const refresh = f.panel.refresh();
+  await f.panel._label(clip, 'false_trigger', 'absent');
+  completeList(listing([structuredClone(clip)])); await refresh;
+  assert.equal(f.panel._items[0].label, 'false_trigger');
+  assert.equal(f.page.querySelectorAll('article')[0].querySelectorAll('select')[1].value, 'absent');
+});
+
+test('subsecond recordings display their real duration and limited context', async () => {
+  const f = await fixture(); await flush();
+  f.response.value = async () => listing([{ ...item('short'), metadata: { pre_seconds: .24, discontinuity: true } }]);
+  await f.panel.refresh();
+  assert.match(f.page.textContent, /0\.24 s.*Short clip/);
+});

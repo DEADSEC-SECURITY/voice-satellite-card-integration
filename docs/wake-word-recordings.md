@@ -79,12 +79,19 @@ While a clip plays, wake detection on the playback device is suspended so the
 recorded wake word cannot wake that device again. Pausing, finishing, or leaving
 the review stops this playback hold; any separate spoken-response hold remains.
 
-Select both labels deliberately and choose **Save review**:
+Select both labels deliberately. Each change saves automatically; check for
+**Saved** below the recording. **Saving…** means the server has not acknowledged
+the change yet. A failed save keeps your answers and shows **Retry save**. Rapid
+changes are queued per recording, and refreshing the inbox retains unsaved edits.
+Reviewed export waits for pending saves and refuses to export failed edits.
 
 - **Correct wake**, **False wake**, **Unsure**, or **Unreviewed** describes the
   detection or your intent.
 - **Wake word: Present**, **Absent**, or **Not sure** describes the actual sound
   in the recording. This is separate from whether you wanted the device to wake.
+
+Each clip displays its actual duration. A subsecond clip is marked as having
+limited audio context; it is not padded to make it look like a full recording.
 
 For example, a TV saying the wake word could be an unwanted wake while the word is
 still acoustically present. Marking a wake as false does not automatically mark
