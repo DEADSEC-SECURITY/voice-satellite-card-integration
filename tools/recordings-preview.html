@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wake recordings — local UI preview</title>
+<style>
+  :root{--primary-text-color:#17212b;--secondary-text-color:#526573;--card-background-color:#fff;--divider-color:#d7e1e8;--error-color:#b42318;font-family:Arial,sans-serif;color:var(--primary-text-color);background:#f1f5f8}
+  body{margin:0;padding:24px}main{max-width:960px;margin:auto}.fixture,.card{padding:20px;background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:12px;margin-bottom:18px}.fixture{border-top:4px solid #1677b5}.fixture h1{font-size:22px;margin:0 0 8px}.fixture p{color:var(--secondary-text-color);line-height:1.5}.fixture-controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.fixture-controls button,.fixture-controls select{font:inherit;padding:9px;border:1px solid #aebdca;border-radius:6px;background:#fff;color:#17212b}.fixture label{display:flex;gap:6px;align-items:center}#fixture-status{min-height:18px;font-size:13px;margin-top:12px}@media(max-width:540px){body{padding:10px}.fixture,.card{padding:14px}}
+</style>
+<main>
+  <section class="fixture">
+    <h1>Wake recordings preview</h1>
+    <p>Local fixtures only. The review controls below are the actual frontend modules.
+      Playback uses a generated quiet test tone. No microphone or Home Assistant connection is used.</p>
+    <div class="fixture-controls">
+      <label>Satellite <select id="fixture-entity"><option value="assist_satellite.kitchen">Kitchen tablet</option><option value="assist_satellite.office">Office tablet (remote)</option></select></label>
+      <label><input type="checkbox" id="fixture-admin" checked> Administrator</label>
+      <label>Voice state <select id="fixture-state"><option>LISTENING</option><option>STT</option><option>TTS</option><option>IDLE</option></select></label>
+      <button type="button" id="fixture-wake">Simulate wake</button>
+      <button type="button" id="fixture-fail">Fail next request</button>
+    </div>
+    <div id="fixture-status" role="status"></div>
+  </section>
+  <section id="recordings-host" class="card"></section>
+</main>
+<script type="module">
+  import { RecordingsPanel } from '../src/recordings/panel.js';
+  import { RecordingReviewPrompt, emitRecordingsUpdated } from '../src/recordings/review.js';
+
+  const $ = id => document.getElementById(id);
+  const localEntity = 'assist_satellite.kitchen';
+  let selectedEntity = localEntity;
+  let failNext = false;
+  const stores = new Map();
+  const config = () => ({ mode:'off', retention_days:7, max_storage_mb:250 });
+  function toneWav() {
+    const count = 12000, buffer = new ArrayBuffer(44 + count * 2), view = new DataView(buffer);
+    const text = (offset, value) => [...value].forEach((char, index) => view.setUint8(offset + index, char.charCodeAt(0)));
+    text(0,'RIFF');view.setUint32(4,36+count*2,true);text(8,'WAVE');text(12,'fmt ');
+    view.setUint32(16,16,true);view.setUint16(20,1,true);view.setUint16(22,1,true);view.setUint32(24,16000,true);
+    view.setUint32(28,32000,true);view.setUint16(32,2,true);view.setUint16(34,16,true);text(36,'data');view.setUint32(40,count*2,true);
+    for(let i=0;i<count;i++)view.setInt16(44+i*2,Math.round(Math.sin(2*Math.PI*220*i/16000)*900),true);
+    let binary='';for(const byte of new Uint8Array(buffer))binary+=String.fromCharCode(byte);
+    return btoa(binary);
+  }
+  const audio = toneWav();
+  function clip(label='unreviewed', captureKind='wake') {
+    return { id:crypto.randomUUID(), capture_id:crypto.randomUUID(), created_at:new Date().toISOString(),
+      label, word_present:'uncertain', bytes:24044,
+      metadata:{ origin:'browser', engine:'openWakeWord', model:'atlas_preview', session_id:'preview-source-session',
+        capture_kind:captureKind, captured_at:new Date().toISOString(), sample_rate:16000, pre_seconds:0.75, trigger_sample:12000 } };
+  }
+  stores.set(localEntity,{config:config(),items:[clip(),clip('false_trigger'),clip('correct')]});
+  stores.set('assist_satellite.office',{config:config(),items:[clip()]});
+  const status = text => {$('fixture-status').textContent=text;};
+  const hass = {
+    user:{is_admin:true},
+    async callWS(request) {
+      await new Promise(resolve=>setTimeout(resolve,120));
+      if(failNext){failNext=false;throw new Error('Simulated connection failure. Retry when ready.');}
+      if(!hass.user.is_admin)throw new Error('Administrator required');
+      const store=stores.get(request.entity_id);
+      if(!store)throw new Error('Unknown satellite');
+      const command=request.type.split('/').pop();
+      if(command==='config')return {...store.config};
+      if(command==='configure'){
+        store.config={mode:request.mode,retention_days:request.retention_days,max_storage_mb:request.max_storage_mb};
+        return {...store.config};
+      }
+      if(command==='list'){
+        const items=store.items.filter(item=>!request.label||item.label===request.label);
+        return {items:structuredClone(items.slice(request.offset,request.offset+request.limit)),total:items.length,config:{...store.config}};
+      }
+      const item=store.items.find(row=>row.id===request.recording_id);
+      if(!item)throw new Error('Recording not found');
+      if(command==='get')return {item:structuredClone(item),audio_base64:audio};
+      if(command==='label'){item.label=request.label;item.word_present=request.word_present;return structuredClone(item);}
+      if(command==='delete'){store.items=store.items.filter(row=>row!==item);return {deleted:true};}
+      throw new Error(`Unknown fixture command: ${command}`);
+    },
+  };
+  const session = {isStarted:true,config:{satellite_entity:localEntity},currentState:'LISTENING',tts:{isPlaying:false}};
+  let review;
+  function saveFixture(kind) {
+    const store=stores.get(localEntity);
+    if(store.config.mode==='off')throw new Error('Enable Save or Save + feedback for the kitchen tablet first.');
+    const item=clip('unreviewed',kind);store.items.unshift(item);emitRecordingsUpdated(localEntity);
+    if(store.config.mode==='review'&&kind==='wake')review.notify({...item,entity_id:localEntity});
+    status(`Saved a simulated ${kind==='wake'?'wake':'missed-wake'} clip.`);
+    return {capture_id:item.capture_id};
+  }
+  session.recordings={
+    getStatus:()=>({mode:stores.get(localEntity).config.mode,available:stores.get(localEntity).config.mode!=='off',pending:0,dropped:0}),
+    captureMissed:async()=>saveFixture('missed'),
+    refreshConfig:async()=>{if(stores.get(localEntity).config.mode!=='review')review.clear();},
+  };
+  const panel = new RecordingsPanel({host:$('recordings-host'),getHass:()=>hass,getEntityId:()=>selectedEntity,getSession:()=>session});
+  review = new RecordingReviewPrompt({getSession:()=>session,getHass:()=>hass,getEntityId:()=>localEntity});
+  panel.mount();
+  $('fixture-entity').addEventListener('change',event=>{selectedEntity=event.target.value;review.clear();panel.update();});
+  $('fixture-admin').addEventListener('change',event=>{hass.user.is_admin=event.target.checked;review.clear();panel.update();});
+  $('fixture-state').addEventListener('change',event=>{session.currentState=event.target.value;session.tts.isPlaying=session.currentState==='TTS';review.tick();});
+  $('fixture-wake').addEventListener('click',()=>{try{saveFixture('wake');}catch(error){status(error.message);}});
+  $('fixture-fail').addEventListener('click',()=>{failNext=true;status('The next fixture request will fail.');});
+  setInterval(()=>{review.tick();panel.update();},250);
+  window.addEventListener('beforeunload',()=>{panel.destroy();review.destroy();});
+</script>
+</html>

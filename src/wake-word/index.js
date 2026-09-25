@@ -741,6 +741,7 @@ export class WakeWordManager {
       this._sampleBufLen = 0;
       this._frameQueue.length = 0;
       this._processing = false;
+      this._session.recordings?.resetAudio();
       if (onDevice) {
         this._active = true;
         // pipeline.restart() at tts-end fires while TTS audio is still
@@ -805,6 +806,7 @@ export class WakeWordManager {
   stop() {
     if (!this._active && !this._stopOnlyMode) return;
     this._active = false;
+    this._session.recordings?.resetAudio();
     this._stopOnlyMode = false;
     this._suspendedKeywords = null;
     this._sampleBufLen = 0;
@@ -871,6 +873,8 @@ export class WakeWordManager {
    */
   feedAudio(chunk) {
     if ((!this._active && !this._stopOnlyMode) || !this._inference) return;
+    const recording = this._active && !this._stopOnlyMode
+      ? this._session.recordings?.feedAudio(chunk) : null;
 
     // Grow pre-allocated buffer if needed (rare - only if chunk is unusually large)
     const needed = this._sampleBufLen + chunk.length;
@@ -892,6 +896,7 @@ export class WakeWordManager {
     while (this._sampleBufLen >= CHUNK_SIZE) {
       if (this._frameQueue.length >= MAX_QUEUE) {
         const dropped = this._frameQueue.shift();
+        if (dropped.capture) this._session.recordings?.markGap(dropped.capture);
         if (this._framePool.length < MAX_POOL) this._framePool.push(dropped.buf);
         droppedFrames++;
       }
@@ -900,7 +905,11 @@ export class WakeWordManager {
       // Capture timestamp rides along so slow-inference devices can
       // detect frames that aged in this queue and fast-ingest them
       // (see WorkerProxyBackend.processChunk).
-      this._frameQueue.push({ buf, t: Date.now() });
+      const capture = recording ? {
+        end: recording.end - this._sampleBufLen + CHUNK_SIZE,
+        generation: recording.generation,
+      } : null;
+      this._frameQueue.push({ buf, t: Date.now(), capture });
       this._sampleBuf.copyWithin(0, CHUNK_SIZE, this._sampleBufLen);
       this._sampleBufLen -= CHUNK_SIZE;
     }
@@ -946,6 +955,7 @@ export class WakeWordManager {
           if (isStopModelName(result.model)) {
             await this._onStopDetection();
           } else {
+            this._session.recordings?.captureDetection(result, frame.capture);
             await this._onDetection(result.model);
           }
           return;
@@ -1548,6 +1558,7 @@ export class WakeWordManager {
       // frame for no reason - defeats the whole "zero local cost when not
       // interrupting" promise.
       this._active = this.isOnDeviceWakeEnabled();
+      this._session.recordings?.resetAudio();
       this._sampleBufLen = 0;
       this._frameQueue.length = 0;
       this._processing = false;
@@ -1624,6 +1635,7 @@ export class WakeWordManager {
       return;
     }
     this._active = !!this._suspendedActiveBeforePlayback;
+    this._session.recordings?.resetAudio();
     this._suspendedActiveBeforePlayback = null;
     this._sampleBufLen = 0;
     this._frameQueue.length = 0;
@@ -1780,6 +1792,7 @@ export class WakeWordManager {
     }
 
     this._log.log('wake-word', 'Restarting detection');
+    this._session.recordings?.resetAudio();
     this._sampleBufLen = 0;
     this._frameQueue.length = 0;
     this._processing = false;

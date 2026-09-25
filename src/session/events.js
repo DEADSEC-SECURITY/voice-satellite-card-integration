@@ -120,6 +120,7 @@ function syncSatelliteState(session, state) {
 export function setState(session, newState) {
   const oldState = session.currentState;
   session.currentState = newState;
+  session.recordings?.review?.tick();
   session.logger.log('state', `${oldState} -> ${newState}`);
 
   // Dismiss screensaver when a voice interaction begins; also manage

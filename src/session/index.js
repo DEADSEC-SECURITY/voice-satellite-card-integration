@@ -30,6 +30,7 @@ import * as kiosk from '../kiosk/index.js';
 import { ScreensaverManager } from '../screensaver';
 import { DiagnosticsManager } from '../diagnostics';
 import { ToastManager } from '../toast';
+import { TriggerRecorder } from '../recordings/index.js';
 import { subscribeSatelliteEvents, teardownSatelliteSubscription } from '../shared/satellite-subscription.js';
 import { dispatchSatelliteEvent, checkRemoteNotificationPlayback } from '../shared/satellite-notification.js';
 import { isEditorPreview } from '../editor/preview.js';
@@ -127,6 +128,7 @@ export class VoiceSatelliteSession {
     this._screensaver = new ScreensaverManager(this);
     this._diagnostics = new DiagnosticsManager(this);
     this._toast = new ToastManager(this);
+    this._recordings = new TriggerRecorder(this);
 
     // Broadcast proxies
     this._uiProxy = new UIBroadcastProxy(this);
@@ -161,6 +163,7 @@ export class VoiceSatelliteSession {
   get screensaver() { return this._screensaver; }
   get diagnostics() { return this._diagnostics; }
   get toast() { return this._toast; }
+  get recordings() { return this._recordings; }
 
   get currentState() { return this._state; }
   set currentState(val) { this._state = val; }
@@ -310,6 +313,7 @@ export class VoiceSatelliteSession {
     if (hass.connection) {
       this._connection = hass.connection;
     }
+    this._recordings.update();
 
     if (this._hasStarted) {
       // Lovelace cards mounted from tool results need the same live hass
@@ -449,6 +453,7 @@ export class VoiceSatelliteSession {
     }
 
     this._syncFullCardSuppression();
+    this._recordings.update();
   }
 
   /**
@@ -495,6 +500,7 @@ export class VoiceSatelliteSession {
    */
   teardown() {
     this._logger.log('session', 'Tearing down session');
+    this._recordings.stop();
     if (this._imageLingerTimeout) {
       clearTimeout(this._imageLingerTimeout);
       this._imageLingerTimeout = null;

@@ -298,6 +298,7 @@ export async function setupNativeWakeHandoff(session, { force = false } = {}) {
 
   _active = true;
   session._nativeWakeActive = true;
+  void session.recordings?.syncNative();
   // getEngine()/isEnabled() answer for the handoff from here on. Adopt that as
   // the baseline or the next HA state change reads the flip as a mode switch
   // the user never made (#137).
@@ -361,6 +362,7 @@ export function teardownNativeWakeHandoff(session, reason = null) {
   _active = false;
   if (session) {
     session._nativeWakeActive = false;
+    void session.recordings?.syncNative();
     session._nativeStopActive = false;
     // The getters answer for the real selects again. Same reason as the setup
     // side: a teardown is not a settings change, and left unsynced the next HA

@@ -53,7 +53,7 @@ async function fixture({ earlyEnd = false, pending = false, browser = false } = 
   }, {context, identifier});
   function load(filename) {
     if (modules.has(filename)) return modules.get(filename);
-    const name = path.relative(root, filename);
+    const name = path.relative(root, filename).split(path.sep).join('/');
     const mod = name === 'src/shared/satellite-state.js'
       ? stub({getSwitchState: () => false, getSelectState: () => 'announcement'}, filename)
       : name === 'src/tts/comms.js' ? stub({playRemote() {}, stopRemote() {}}, filename)

@@ -49,7 +49,7 @@ async function fixture({ realPipeline = false } = {}) {
   const modules = new Map();
   function load(filename) {
     if (modules.has(filename)) return modules.get(filename);
-    const stub = stubs[path.relative(root, filename)];
+    const stub = stubs[path.relative(root, filename).split(path.sep).join('/')];
     const module = stub
       ? new vm.SyntheticModule(Object.keys(stub), function () {
         for (const [key, value] of Object.entries(stub)) this.setExport(key, value);

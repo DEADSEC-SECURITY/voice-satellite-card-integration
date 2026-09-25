@@ -32,7 +32,7 @@ async function fixture() {
   };
   function load(filename) {
     if (modules.has(filename)) return modules.get(filename);
-    const relative = path.relative(root, filename);
+    const relative = path.relative(root, filename).split(path.sep).join('/');
     const stub = stubs[relative];
     const module = stub
       ? new vm.SyntheticModule(Object.keys(stub), function () {

@@ -24,6 +24,7 @@ from homeassistant.helpers import config_validation as cv
 
 from .const import DOMAIN
 from .diagnostics import register as register_diagnostics
+from .recordings import register as register_recordings
 from .media_proxy import async_setup_media_proxy
 from .frontend import (
     async_register_resource,
@@ -416,6 +417,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     websocket_api.async_register_command(hass, ws_get_panel_settings)
     websocket_api.async_register_command(hass, ws_save_panel_settings)
     register_diagnostics(hass)
+    register_recordings(hass)
 
     # Same-origin proxy for HTTP-only media sources (e.g. Music Assistant)
     # so they play on the HTTPS panel without mixed-content blocking.

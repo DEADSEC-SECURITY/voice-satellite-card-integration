@@ -42,6 +42,7 @@ import { buildMarkdownReport } from '../diagnostics/report.js';
 import { exportLogBufferText } from '../logger.js';
 import { redactText } from '../shared/redact.js';
 import { getAudioInputDeviceOptions } from '../audio/devices.js';
+import { RecordingsPanel } from '../recordings/panel.js';
 
 const P = 'vsp';
 const CONFIG_KEY = 'vs-panel-config';
@@ -298,11 +299,14 @@ class VoiceSatellitePanel extends HTMLElement {
       this._buildDom();
     }
     this._statusInterval = setInterval(() => this._updateStatus(), 1000);
+    this._mountRecordingsPanel();
     this._deviceChangeHandler = () => this._refreshMicrophoneOptions();
     navigator.mediaDevices?.addEventListener?.('devicechange', this._deviceChangeHandler);
   }
 
   disconnectedCallback() {
+    this._recordingsPanel?.destroy();
+    this._recordingsPanel = null;
     if (this._statusInterval) {
       clearInterval(this._statusInterval);
       this._statusInterval = null;
@@ -337,6 +341,18 @@ class VoiceSatellitePanel extends HTMLElement {
 
   _getSession() {
     return window.__vsSession || null;
+  }
+
+  _mountRecordingsPanel() {
+    const host = this.querySelector(`.${P}-recordings-host`);
+    if (!host || this._recordingsPanel) return;
+    this._recordingsPanel = new RecordingsPanel({
+      host,
+      getHass: () => this._hass,
+      getEntityId: () => this._config.satellite_entity,
+      getSession: () => this._getSession(),
+    });
+    this._recordingsPanel.mount();
   }
 
   _updateForm() {
@@ -467,6 +483,7 @@ class VoiceSatellitePanel extends HTMLElement {
 
   _updateStatus() {
     const session = this._getSession();
+    this._recordingsPanel?.update();
 
     const dot = this.querySelector(`.${P}-status-dot`);
     const label = this.querySelector(`.${P}-status-label`);
@@ -1897,6 +1914,8 @@ class VoiceSatellitePanel extends HTMLElement {
         </div>
       </div>
 
+      <div class="${P}-card ${P}-recordings-host"></div>
+
       <div class="${P}-card ${P}-tester-card">
         <div class="${P}-card-title">Wake Word Tester</div>
         <div class="${P}-card-subtitle">
@@ -2057,6 +2076,7 @@ class VoiceSatellitePanel extends HTMLElement {
 
     // Wire up the diagnostics card and kick off the first run
     this._initDiagnosticsCard();
+    this._mountRecordingsPanel();
   }
 
   // ─── Diagnostics & troubleshooting ─────────────────────────────────
