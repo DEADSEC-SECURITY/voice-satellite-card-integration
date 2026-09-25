@@ -127,6 +127,48 @@ async def ws_list(hass, connection, msg):
 
 
 @websocket_api.websocket_command({
+    vol.Required("type"): "voice_satellite/recordings/review_list",
+    vol.Optional("entity_id"): str,
+    vol.Optional("label"): vol.In(("correct", "false_trigger", "unsure", "unreviewed")),
+    vol.Optional("limit"): vol.All(int, vol.Range(min=1, max=100)),
+    vol.Optional("offset"): vol.All(int, vol.Range(min=0, max=1000000)),
+})
+@websocket_api.async_response
+async def ws_review_list(hass, connection, msg):
+    """Review a station or all stations without registering a voice client."""
+    try:
+        if connection.user is None or not connection.user.is_admin:
+            raise RecordingError("unauthorized", "An administrator is required to review recordings.")
+        stations = []
+        for entity in hass.data.get(DOMAIN, {}).values():
+            entity_id = getattr(entity, "entity_id", None)
+            if not isinstance(entity_id, str) or not entity_id.startswith("assist_satellite."):
+                continue
+            owner = _authorize(hass, connection, entity_id, "list")
+            state = hass.states.get(entity_id) if getattr(hass, "states", None) else None
+            name = state.attributes.get("friendly_name") if state else None
+            stations.append({"entity_id": entity_id, "name": name or entity_id, "owner": owner})
+        stations.sort(key=lambda station: (station["name"].casefold(), station["entity_id"]))
+        selected = msg.get("entity_id")
+        if selected is not None:
+            _authorize(hass, connection, selected, "list")
+        scoped = [station for station in stations if selected is None or station["entity_id"] == selected]
+        result = await hass.async_add_executor_job(
+            _store(hass).review_list, scoped, msg.get("label"), msg.get("limit", 50), msg.get("offset", 0))
+        result["stations"] = [{"entity_id": station["entity_id"], "name": station["name"]} for station in stations]
+        if selected is None:
+            result["config"] = None  # All-station review never exposes a bulk settings action.
+    except RecordingError as err:
+        connection.send_error(msg["id"], err.code, str(err))
+        return
+    except (OSError, ValueError, KeyError, TypeError):
+        _LOGGER.warning("Wake recording review listing failed")
+        connection.send_error(msg["id"], "storage_error", "Recording storage is unavailable or inconsistent.")
+        return
+    connection.send_result(msg["id"], result)
+
+
+@websocket_api.websocket_command({
     vol.Required("type"): "voice_satellite/recordings/get",
     vol.Required("entity_id"): str,
     vol.Required("recording_id"): str,
@@ -160,7 +202,7 @@ async def ws_delete(hass, connection, msg):
 
 def register(hass: HomeAssistant) -> None:
     """Register private recording commands once during integration setup."""
-    for handler in (ws_config, ws_configure, ws_save, ws_list, ws_get, ws_label, ws_delete):
+    for handler in (ws_config, ws_configure, ws_save, ws_list, ws_review_list, ws_get, ws_label, ws_delete):
         websocket_api.async_register_command(hass, handler)
 
     async def cleanup(_now) -> None:

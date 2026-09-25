@@ -42,19 +42,21 @@ export function reviewedItems(items) {
   return items.filter(item => ['correct', 'false_trigger', 'unsure'].includes(item.label));
 }
 
-export function recordingFilename(id) {
-  return `wake-${String(id).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80)}.wav`;
+export function recordingFilename(id, entityId = '') {
+  const owner = entityId ? `${String(entityId).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 200)}-` : '';
+  return `wake-${owner}${String(id).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80)}.wav`;
 }
 
 export class RecordingsPanel {
-  constructor({ host, getHass, getEntityId, getSession }) {
+  constructor({ host, getHass, getEntityId = () => null, getSession = () => null, standalone = false }) {
     Object.assign(this, { _host: host, _getHass: getHass, _getEntityId: getEntityId, _getSession: getSession });
+    this._standalone = standalone; this._selection = null; this._stations = [];
     this._entity = null; this._items = []; this._total = 0; this._offset = 0;
     this._filter = ''; this._config = { mode: 'off', retention_days: 7, max_storage_mb: 250 };
     this._sequence = 0; this._entityEpoch = 0; this._urls = new Set(); this._mounted = false; this._busy = false;
     this._players = new Map();
     this._onUpdated = event => {
-      if (event.detail?.entity_id !== this._entity || this._busy) return;
+      if (((!this._standalone || this._entity) && event.detail?.entity_id !== this._entity) || this._busy) return;
       if (this._isPlaying()) this._refreshPending = true;
       else this.refresh();
     };
@@ -69,14 +71,14 @@ export class RecordingsPanel {
 
   update() {
     if (!this._mounted) return;
-    const entity = this._getEntityId() || null;
+    const entity = (this._standalone ? this._selection : this._getEntityId()) || null;
     const admin = !!this._getHass()?.user?.is_admin;
     if (entity !== this._entity || admin !== this._admin) {
       this._entity = entity; this._admin = admin; this._items = []; this._total = 0; this._offset = 0;
       this._sequence += 1; this._entityEpoch += 1; this._busy = false; this._error = ''; this._refreshPending = false;
       this._config = { mode: 'off', retention_days: 7, max_storage_mb: 250 };
       this._render();
-      if (entity && admin) this.refresh();
+      if ((entity || this._standalone) && admin) this.refresh();
     }
     if (this._refreshPending && !this._busy && !this._isPlaying()) {
       this._refreshPending = false; this.refresh();
@@ -85,20 +87,26 @@ export class RecordingsPanel {
   }
 
   _ws(command, data = {}, entityId = this._entity) {
-    if (!entityId) return Promise.reject(new Error('Select a satellite first'));
-    return this._getHass().callWS({ type: `voice_satellite/recordings/${command}`, ...data, entity_id: entityId });
+    if (!entityId && command !== 'review_list') return Promise.reject(new Error('Select a satellite first'));
+    return this._getHass().callWS({ type: `voice_satellite/recordings/${command}`, ...data, ...(entityId ? { entity_id: entityId } : {}) });
   }
 
   async refresh() {
-    if (!this._entity || !this._admin || !this._mounted) return;
+    if ((!this._entity && !this._standalone) || !this._admin || !this._mounted) return;
     const sequence = ++this._sequence;
     const entityId = this._entity;
     this._error = ''; this._loading = true;
     this._render();
     try {
-      const data = await this._ws('list', { limit: PAGE_SIZE, offset: this._offset, ...(this._filter ? { label: this._filter } : {}) }, entityId);
+      const data = await this._ws(this._standalone ? 'review_list' : 'list', { limit: PAGE_SIZE, offset: this._offset, ...(this._filter ? { label: this._filter } : {}) }, entityId);
       if (sequence !== this._sequence || !this._mounted) return;
-      this._items = data.items; this._total = data.total; this._config = data.config;
+      this._items = data.items; this._total = data.total;
+      if (data.config) this._config = data.config;
+      if (data.stations) this._stations = data.stations;
+      if (this._offset && this._offset >= this._total) {
+        this._offset = Math.max(0, Math.ceil(this._total / PAGE_SIZE) - 1) * PAGE_SIZE;
+        return this.refresh();
+      }
     } catch (error) {
       if (sequence !== this._sequence || !this._mounted) return;
       this._error = error?.message || String(error);
@@ -140,6 +148,7 @@ export class RecordingsPanel {
   }
 
   async _configure(mode, retentionDays, maxStorageMb) {
+    if (!this._entity || this._loading) return;
     await this._action(async entityId => {
       await this._ws('configure', { mode, retention_days: retentionDays, max_storage_mb: maxStorageMb }, entityId);
       if (entityId === this._entity) await this._localManager()?.refreshConfig?.();
@@ -148,16 +157,18 @@ export class RecordingsPanel {
   }
 
   async _label(item, label, wordPresent) {
-    await this._action(async entityId => {
+    await this._action(async selectedEntity => {
+      const entityId = item.entity_id || selectedEntity;
       await this._ws('label', { recording_id: item.id, label, word_present: wordPresent }, entityId);
       emitRecordingsUpdated(entityId);
     });
   }
 
   async _play(item, target, entityId) {
+    const scope = this._entity, epoch = this._entityEpoch;
     try {
       const data = await this._ws('get', { recording_id: item.id }, entityId);
-      if (!this._mounted || entityId !== this._entity || !target.isConnected) return;
+      if (!this._mounted || scope !== this._entity || epoch !== this._entityEpoch || !target.isConnected) return;
       this._disposePlayers(target);
       const url = URL.createObjectURL(recordingBlob(data.audio_base64));
       this._urls.add(url);
@@ -167,7 +178,7 @@ export class RecordingsPanel {
       target.replaceChildren(audio);
       // Playback requires a user's explicit action; never auto-play a captured clip.
     } catch (error) {
-      if (this._mounted && entityId === this._entity && target.isConnected) {
+      if (this._mounted && scope === this._entity && epoch === this._entityEpoch && target.isConnected) {
         this._disposePlayers(target);
         target.textContent = `Unable to load recording: ${error?.message || String(error)}`;
       }
@@ -230,25 +241,29 @@ export class RecordingsPanel {
   }
 
   async _downloadWav(item, entityId) {
+    const scope = this._entity, epoch = this._entityEpoch;
     await this._action(async () => {
       const data = await this._ws('get', { recording_id: item.id }, entityId);
-      if (this._mounted && entityId === this._entity) this._download(recordingBlob(data.audio_base64), recordingFilename(item.id));
+      if (this._mounted && scope === this._entity && epoch === this._entityEpoch) this._download(recordingBlob(data.audio_base64), recordingFilename(item.id, item.entity_id));
     }, { refresh: false });
   }
 
   async _exportReviewedPage() {
     const items = reviewedItems(this._items).slice(0, PAGE_SIZE);
+    const epoch = this._entityEpoch;
     await this._action(async entityId => {
       const exported = [];
       for (const item of items) {
-        if (!this._mounted || entityId !== this._entity) return;
-        const data = await this._ws('get', { recording_id: item.id }, entityId);
+        if (!this._mounted || entityId !== this._entity || epoch !== this._entityEpoch) return;
+        const owner = item.entity_id || entityId;
+        const data = await this._ws('get', { recording_id: item.id }, owner);
         // Recheck the stored label: another admin may have changed it since listing.
         if (!reviewedItems([data.item]).length) continue;
         recordingBlob(data.audio_base64);
-        exported.push({ ...data.item, wav_filename: recordingFilename(data.item.id), audio_base64: data.audio_base64 });
+        exported.push({ ...data.item, entity_id: owner, station_name: item.station_name,
+          wav_filename: recordingFilename(data.item.id, item.entity_id), audio_base64: data.audio_base64 });
       }
-      if (!this._mounted || entityId !== this._entity) return;
+      if (!this._mounted || entityId !== this._entity || epoch !== this._entityEpoch) return;
       const manifest = { format: 'voice_satellite_reviewed_recordings_v1', entity_id: entityId,
         exported_at: new Date().toISOString(), scope: 'reviewed_items_on_displayed_page',
         label_policy: 'Feedback and acoustic word presence are independent user labels. No automatic training label is inferred.', items: exported };
@@ -261,13 +276,25 @@ export class RecordingsPanel {
     this._disposePlayers();
     this._urls.forEach(url => URL.revokeObjectURL(url)); this._urls.clear();
     const root = element('div', undefined, 'vsp-recordings');
+    this._captureButton = null; this._captureStatus = null;
     const style = element('style');
     style.textContent = '.vsp-recordings .row{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:12px 0}.vsp-recordings button,.vsp-recordings select,.vsp-recordings input{min-height:38px;font:inherit;border:1px solid var(--divider-color,#ccc);border-radius:6px;padding:6px 10px;color:var(--primary-text-color);background:var(--card-background-color)}.vsp-recordings button{cursor:pointer}.vsp-recordings button:disabled{opacity:.5;cursor:default}.vsp-recordings article{border-top:1px solid var(--divider-color,#ddd);padding:12px 0}.vsp-recordings .hint{font-size:13px;color:var(--secondary-text-color);line-height:1.5}.vsp-recordings .error{color:var(--error-color,#b00)}.vsp-recordings audio{width:100%;margin-top:8px}.vsp-recordings input{width:80px}.vsp-recordings h3{margin:0 0 10px;font-size:18px}';
-    root.append(style, element('h3', 'Wake recordings'));
-    root.appendChild(element('p', 'Save up to five seconds ending at a wake detection for later review. Audio stays in Home Assistant unless you export it. Recording is off by default.', 'hint'));
-    if (!this._entity) root.appendChild(element('p', 'Select a satellite to manage its recordings.'));
-    else if (!this._admin) root.appendChild(element('p', 'A Home Assistant administrator is required to change recording settings or review saved audio.'));
+    root.append(style, element('h3', this._standalone ? 'Recordings inbox' : 'Wake recordings'));
+    root.appendChild(element('p', this._standalone
+      ? 'Listen, label, and export saved clips from your stations. Choosing a station here only filters the inbox.'
+      : 'Save up to five seconds ending at a wake detection for later review. Audio stays in Home Assistant unless you export it. Recording is off by default.', 'hint'));
+    if (!this._admin) root.appendChild(element('p', 'A Home Assistant administrator is required to change recording settings or review saved audio.'));
+    else if (!this._entity && !this._standalone) root.appendChild(element('p', 'Select a satellite to manage its recordings.'));
     else {
+      if (this._standalone) {
+        const stations = element('div', undefined, 'row');
+        const choices = [['', 'All stations'], ...this._stations.map(station => [station.entity_id, station.name])];
+        if (this._entity && !this._stations.some(station => station.entity_id === this._entity)) choices.push([this._entity, this._entity]);
+        const selector = select('Review recordings from station', choices, this._entity || '');
+        selector.addEventListener('change', () => { this._selection = selector.value || null; this.update(); });
+        stations.append(element('span', 'Station'), selector); root.appendChild(stations);
+      }
+      if (this._entity) {
       const settings = element('div', undefined, 'row');
       const mode = select('Recording mode', [['off', 'Off'], ['save', 'Save'], ['review', 'Save + feedback']], this._config.mode);
       const retention = element('input'); retention.type = 'number'; retention.min = '1'; retention.max = '365'; retention.value = this._config.retention_days;
@@ -281,6 +308,7 @@ export class RecordingsPanel {
         }
         this._configure(mode.value, days, mb);
       });
+      apply.disabled = this._loading || !!this._error;
       settings.append(mode, element('span', 'Keep days'), retention, element('span', 'Limit MB'), quota, apply);
       root.append(settings, element('p', 'Save + feedback asks silently after the voice interaction finishes. Feedback and whether the wake word was actually spoken are recorded separately. Retention applies to reviewed and unreviewed clips; a full storage limit stops new saves.', 'hint'));
       const captureRow = element('div', undefined, 'row');
@@ -291,6 +319,7 @@ export class RecordingsPanel {
       }));
       this._captureStatus = element('span', '', 'hint');
       captureRow.append(this._captureButton, this._captureStatus); root.appendChild(captureRow);
+      } else root.appendChild(element('p', 'Choose one station to change its recording settings. Audio stays in Home Assistant unless you export it.', 'hint'));
       const tools = element('div', undefined, 'row');
       const filter = select('Filter recording review state', [['', 'All recordings'], ...LABELS], this._filter);
       filter.addEventListener('change', () => { this._filter = filter.value; this._offset = 0; this.refresh(); });
@@ -300,11 +329,12 @@ export class RecordingsPanel {
       root.appendChild(element('p', 'Export contains reviewed audio and labels from this page in one JSON file. Individual WAV downloads are available below.', 'hint'));
       if (this._loading) root.appendChild(element('p', 'Loading recordings…'));
       else if (!this._items.length) root.appendChild(element('p', 'No recordings in this view.'));
-      const entityId = this._entity;
       for (const item of this._items) {
+        const entityId = item.entity_id || this._entity;
         const row = element('article');
         const date = new Date(item.created_at);
         row.appendChild(element('strong', Number.isNaN(date.getTime()) ? String(item.created_at || 'Recording') : date.toLocaleString()));
+        if (this._standalone) row.appendChild(element('div', item.station_name || entityId, 'hint'));
         const metadata = item.metadata || {};
         row.appendChild(element('div', [metadata.capture_kind === 'missed' ? 'Missed wake capture' : 'Wake detection', metadata.engine, metadata.model].filter(Boolean).join(' · '), 'hint'));
         const controls = element('div', undefined, 'row');
@@ -314,8 +344,8 @@ export class RecordingsPanel {
         controls.append(label, element('span', 'Wake word:'), presence, button('Save review', () => this._label(item, label.value, presence.value)),
           button('Listen', () => this._play(item, player, entityId)), button('Download WAV', () => this._downloadWav(item, entityId)),
           button('Delete', () => {
-            if (window.confirm('Delete this saved recording and its review?')) this._action(async selectedEntity => {
-              await this._ws('delete', { recording_id: item.id }, selectedEntity); emitRecordingsUpdated(selectedEntity);
+            if (window.confirm('Delete this saved recording and its review?')) this._action(async () => {
+              await this._ws('delete', { recording_id: item.id }, entityId); emitRecordingsUpdated(entityId);
             });
           }));
         row.append(controls, player); root.appendChild(row);

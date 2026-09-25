@@ -174,6 +174,7 @@ export class PipelineManager {
       start_stage: opts.start_stage || 'wake_word',
       end_stage: opts.end_stage || 'tts',
       sample_rate: 16000,
+      ...(this._card._runtimeId ? { runtime_id: this._card._runtimeId } : {}),
     };
 
     if (opts.conversation_id) {

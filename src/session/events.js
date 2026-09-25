@@ -247,8 +247,19 @@ async function _startListeningBody(session) {
   }
 
   session._starting = true;
+  const startingEntity = session.config.satellite_entity;
+  const checkEntity = () => {
+    if (startingEntity !== session.config.satellite_entity) throw new Error('Satellite selection changed during startup');
+  };
 
   try {
+    // Reserve the station before native wake, the mic or recording can start.
+    // Event subscription is the runtime claim, not a passive review feed.
+    const claimed = await subscribeSatelliteEvents(session, (event) => dispatchSatelliteEvent(session, event));
+    checkEntity();
+    if ((!claimed && !session._runtimeClaimed) || session._userStopped) return 'aborted';
+    session.recordings?.update();
+
     // Kiosk Satellite: if we're hosted in the app and it can run the selected
     // engine natively (and wake detection is enabled in its settings), hand
     // detection off before deciding the mode - getWakeWordMode() then reports
@@ -273,10 +284,16 @@ async function _startListeningBody(session) {
 
     // Read local sound lengths before the native wake engine can trigger.
     await refreshNativeChimeDurations();
+    checkEntity();
     if (session._userStopped) return 'aborted';
     await setupNativeWakeHandoff(session).catch((e) => {
       session.logger.error('wake-word', `Native wake handoff failed: ${e.message || e}`);
     });
+    checkEntity();
+    if (session._userStopped || !session._runtimeClaimed) {
+      teardownNativeWakeHandoff(session);
+      return 'aborted';
+    }
 
     const mode = getWakeWordMode(session);
     const seamlessWakeCommand = session.config.seamless_wake_command === true;
@@ -347,6 +364,7 @@ async function _startListeningBody(session) {
     } else {
       setState(session, State.CONNECTING);
       await session.audio.startMicrophone();
+      checkEntity();
 
       // On-device wake word: load module lazily, start local inference.
       // HA wake word mode + stop word switch on: also load the module so
@@ -358,11 +376,14 @@ async function _startListeningBody(session) {
       ) === true;
       if (mode === WAKE_MODE_LOCAL) {
         const ww = await session._loadWakeWordModule();
+        checkEntity();
         // Constrained-WebView delay moved inside ww.start() (wake-word/index.js)
         // so all start paths benefit, not just this one.  No-op here.
         await ww.start();
+        checkEntity();
       } else {
         const result = await session.pipeline.start();
+        checkEntity();
         if (result === 'aborted' || session._userStopped) return 'aborted';
         if (mode === WAKE_MODE_HA && stopWordOn) {
           // Load runtime in standby. Failure here is non-fatal - stop-word
@@ -403,6 +424,13 @@ async function _startListeningBody(session) {
     // Setup double-tap after first successful start
     session.doubleTap.setup();
   } catch (e) {
+    if (startingEntity !== session.config.satellite_entity) {
+      // Keep starts serialized while releasing any late native/mic setup for
+      // the old selection. The replacement must obtain its own server claim.
+      session.teardown();
+      if (session._userStopped || !session.config.satellite_entity) return 'aborted';
+      return await _startListeningBody(session);
+    }
     // Rollback: if mic was started but pipeline failed, stop it
     try { session.audio.stopMicrophone(); } catch (_) {}
 

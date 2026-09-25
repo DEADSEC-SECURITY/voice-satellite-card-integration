@@ -620,6 +620,9 @@ async def ws_update_state(
         )
         return
 
+    if not entity.has_satellite_subscriber(connection):
+        connection.send_error(msg["id"], "satellite_in_use", "This browser does not own the satellite runtime")
+        return
     entity.set_pipeline_state(state)
     connection.send_result(msg["id"], {"success": True})
 
@@ -733,6 +736,7 @@ async def ws_question_answered(
     {
         vol.Required("type"): "voice_satellite/run_pipeline",
         vol.Required("entity_id"): str,
+        vol.Optional("runtime_id"): vol.All(str, vol.Length(min=1, max=128)),
         vol.Required("start_stage"): str,
         vol.Required("end_stage"): str,
         vol.Required("sample_rate"): int,
@@ -776,25 +780,18 @@ async def ws_run_pipeline(
         )
         return
 
+    # Claim ownership before touching an existing turn. The companion app
+    # carries the page's runtime_id on its separate authenticated audio socket.
+    if not entity.is_runtime_owner(connection, msg.get("runtime_id")):
+        connection.send_error(msg["id"], "satellite_in_use", "This satellite is active on another device. Use Wake recordings to review it.")
+        return
+
     # Stop the old pipeline's audio stream so internal HA tasks (wake word,
     # STT) unblock naturally.  We must NOT cancel immediately - the stop
     # signal and CancelledError would race on `await audio_queue.get()`,
     # and CancelledError always wins, leaving orphaned PipelineInput tasks.
     # Instead: send stop signal -> wait for natural exit -> cancel only on timeout.
     if entity.pipeline_audio_queue is not None:
-        old_conn = entity.pipeline_connection
-        old_msg_id = entity.pipeline_msg_id
-        if old_conn is not None and old_conn is not connection:
-            _LOGGER.warning(
-                "Pipeline for '%s' displaced by a different browser connection "
-                " -  the previous browser will stop receiving wake word events. "
-                "Each browser must use its own satellite entity.",
-                entity.satellite_name,
-            )
-            try:
-                old_conn.send_event(old_msg_id, {"type": "displaced"})
-            except Exception:
-                pass  # old connection may already be dead
         entity.pipeline_audio_queue.put_nowait(b"")
 
     old_task = entity.pipeline_task
@@ -806,6 +803,11 @@ async def ws_run_pipeline(
                 await old_task
             except (asyncio.CancelledError, Exception):
                 pass
+
+    # Waiting for the previous turn yields to socket cleanup and new claims.
+    if not entity.is_runtime_owner(connection, msg.get("runtime_id")):
+        connection.send_error(msg["id"], "satellite_in_use", "The satellite runtime changed while starting this turn")
+        return
 
     # Text-input variant: no audio queue, no binary handler, no audio stream.
     # Used by voice_satellite.show - pipeline runs from start_stage=intent
@@ -907,6 +909,7 @@ async def ws_run_pipeline(
     {
         vol.Required("type"): "voice_satellite/subscribe_events",
         vol.Required("entity_id"): str,
+        vol.Optional("runtime_id"): vol.All(str, vol.Length(min=1, max=128)),
     }
 )
 @websocket_api.async_response
@@ -929,7 +932,9 @@ async def ws_subscribe_satellite_events(
         )
         return
 
-    entity.register_satellite_subscription(connection, msg["id"])
+    if not entity.register_satellite_subscription(connection, msg["id"], msg.get("runtime_id")):
+        connection.send_error(msg["id"], "satellite_in_use", "This satellite is active on another device. Use Wake recordings to review it.")
+        return
     connection.send_result(msg["id"])
 
     def unsub() -> None:

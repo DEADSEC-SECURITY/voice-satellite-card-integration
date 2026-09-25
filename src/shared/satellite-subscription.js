@@ -35,6 +35,9 @@ let _reconnectConnection = null;
 let _card = null;
 let _onEvent = null;
 let _retryTimer = null;
+let _pending = null;
+let _generation = 0;
+let _socketGeneration = 0;
 
 const RETRY_DELAYS = [2000, 4000, 8000, 16000, 30000];
 let _retryCount = 0;
@@ -67,16 +70,19 @@ function _verifyNow(card) {
   if (!_subscribed || !_unsubscribe) return;
   const conn = card.connection;
   if (!conn) return;
+  const generation = _generation;
   conn.sendMessagePromise({
     type: 'voice_satellite/subscription_check',
     entity_id: card.config.satellite_entity,
   }).then((res) => {
+    if (generation !== _generation) return;
     if (!res || res.subscribed !== false) return;
     card.logger.log('satellite-sub', 'Subscription lost server-side - re-subscribing');
     // Dead server-side: drop the handle (nothing to unsubscribe, and a stale
     // unsubscribe is exactly the id-collision hazard), then re-establish.
     _unsubscribe = null;
     _subscribed = false;
+    card._runtimeClaimed = false;
     _stopVerify();
     const c = card.connection;
     if (c) {
@@ -98,13 +104,13 @@ function _verifyNow(card) {
  */
 export function subscribeSatelliteEvents(card, onEvent) {
   const { config, connection } = card;
-  if (!config.satellite_entity || !connection) return;
-  if (_subscribed) return;
+  if (!config.satellite_entity || !connection) return Promise.resolve(false);
+  if (_subscribed) return _pending || Promise.resolve(card._runtimeClaimed === true);
 
   _card = card;
   _onEvent = onEvent;
   _subscribed = true;
-  _doSubscribe(card, connection, onEvent);
+  const pending = _doSubscribe(card, connection, onEvent);
 
   // The ONLY re-subscribe path on reconnect (the subscription itself opts out
   // of haws replay) — so a failure lands in _doSubscribe's retry/backoff, and
@@ -122,6 +128,10 @@ export function subscribeSatelliteEvents(card, onEvent) {
       // was unregistered 3ms after registering; announcements went nowhere
       // while the card believed it was subscribed.) Just drop the handle.
       _unsubscribe = null;
+      ++_generation;
+      ++_socketGeneration;
+      _pending = null;
+      card._runtimeClaimed = false;
       _stopVerify();
       if (_retryTimer) {
         clearTimeout(_retryTimer);
@@ -138,11 +148,16 @@ export function subscribeSatelliteEvents(card, onEvent) {
     connection.addEventListener('ready', _reconnectListener);
     _reconnectConnection = connection;
   }
+  return pending;
 }
 
 function _doSubscribe(card, connection, onEvent) {
-  connection.subscribeMessage(
+  const generation = ++_generation;
+  const socketGeneration = _socketGeneration;
+  const entityId = card.config.satellite_entity;
+  const pending = connection.subscribeMessage(
     (message) => {
+      if (generation !== _generation || entityId !== card.config.satellite_entity) return;
       // Integration reload: entity is being torn down, re-subscribe after delay
       if (message.type === 'reload') {
         card.logger.log('satellite-sub', 'Integration reloading - will re-subscribe');
@@ -158,13 +173,27 @@ function _doSubscribe(card, connection, onEvent) {
     },
     {
       type: 'voice_satellite/subscribe_events',
-      entity_id: card.config.satellite_entity,
+      entity_id: entityId,
+      ...(card._runtimeId ? { runtime_id: card._runtimeId } : {}),
     },
     // No haws auto-replay: the 'ready' listener above re-subscribes with
     // retry/backoff instead (see the header comment for why).
     { resubscribe: false },
   ).then((unsub) => {
+    if (generation !== _generation || entityId !== card.config.satellite_entity) {
+      if (generation === _generation) {
+        _subscribed = false;
+        card._runtimeClaimed = false;
+      }
+      // Teardown on the same socket: release a late subscription. Across a
+      // reconnect, never send an old message id into the new id-space.
+      if (socketGeneration === _socketGeneration) {
+        try { Promise.resolve(unsub()).catch(() => {}); } catch (_) { /* cleanup */ }
+      }
+      return false;
+    }
     _unsubscribe = unsub;
+    card._runtimeClaimed = true;
     _retryCount = 0;
     // New subscription session = new server id-space (HA may have restarted
     // and reset its announce counter) — start the notification dedup over.
@@ -173,11 +202,27 @@ function _doSubscribe(card, connection, onEvent) {
     // Trust, but verify: reconnect races can unregister this server-side
     // moments from now without telling us (see the verification block above).
     _startVerify(card);
+    if (!card.isStarted && !card._starting && !card._userStopped) {
+      card._startAttempted = false;
+      void card.start?.();
+    }
+    return true;
   }).catch((err) => {
+    if (generation !== _generation) return false;
     card.logger.error('satellite-sub', `Failed to subscribe: ${err}`);
     _subscribed = false;
+    card._runtimeClaimed = false;
+    if (err?.code === 'satellite_in_use') {
+      card.handleRuntimeConflict?.();
+      return false;
+    }
     _scheduleRetry(card, connection, onEvent);
+    return false;
+  }).finally(() => {
+    if (_pending === pending) _pending = null;
   });
+  _pending = pending;
+  return pending;
 }
 
 function _scheduleRetry(card, connection, onEvent) {
@@ -196,6 +241,9 @@ function _scheduleRetry(card, connection, onEvent) {
 }
 
 function _cleanup() {
+  ++_generation;
+  _pending = null;
+  if (_card) _card._runtimeClaimed = false;
   _stopVerify();
   if (_retryTimer) {
     clearTimeout(_retryTimer);

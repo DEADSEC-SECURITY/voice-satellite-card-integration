@@ -29,6 +29,7 @@ class Element {
   play() { this.paused = false; this.listeners.play?.(); return Promise.resolve(); }
   pause() { this.pauseWhileConnected.push(this.isConnected); this.paused = true; this.listeners.pause?.(); }
   click() { if (!this.disabled) return this.listeners.click?.(); }
+  focus() { this.focused = true; }
   checkValidity() { return Number.isInteger(Number(this.value)) && Number(this.value) >= Number(this.min) && Number(this.value) <= Number(this.max); }
   querySelectorAll(selector) {
     const tags = selector.split(',').map(value => value.trim());
@@ -99,7 +100,11 @@ test('feedback waits for TTS and stable idle; explicit feedback does not infer a
   assert.equal(f.body.querySelectorAll('section').length, 0);
   f.session.tts.isPlaying = false; f.prompt.tick(); f.advance(750); f.prompt.tick();
   assert.equal(f.body.querySelectorAll('section').length, 1);
-  await find(f.body, 'button', 'Correct wake').click();
+  find(f.body, 'button', 'Yes, on purpose').click();
+  assert.equal(f.calls.length, 0, 'Intent alone must not label the acoustic contents');
+  assert.equal(find(f.body, 'button', 'Save feedback').disabled, true);
+  find(f.body, 'button', "I'm not sure").click();
+  await find(f.body, 'button', 'Save feedback').click();
   assert.equal(f.calls.length, 1);
   assert.equal(f.calls[0].recording_id, 'clip-a');
   assert.equal(f.calls[0].id, undefined, 'HA reserves top-level id');
@@ -113,7 +118,7 @@ test('skip, timeout, interaction restart, and clear leave clips unreviewed', asy
   for (const action of ['skip', 'timeout', 'busy', 'clear']) {
     f.prompt.notify({ id: action, entity_id: f.entity.value }); f.advance(1100); f.prompt.tick();
     assert.equal(f.body.querySelectorAll('section').length, 1);
-    if (action === 'skip') find(f.body, 'button', 'Skip').click();
+    if (action === 'skip') find(f.body, 'button', 'Review later').click();
     if (action === 'timeout') { f.advance(30000); f.prompt.tick(); }
     if (action === 'busy') { f.session.currentState = 'STT'; f.prompt.tick(); f.session.currentState = 'LISTENING'; }
     if (action === 'clear') f.prompt.clear();
@@ -161,11 +166,83 @@ test('feedback request keeps its original entity while a device switch dismisses
   const f = await fixture(); let resolve;
   f.server.response = () => new Promise(done => { resolve = done; });
   f.prompt.notify({ id: 'pending', entity_id: f.entity.value }); f.advance(1100); f.prompt.tick();
-  const request = find(f.body, 'button', 'False wake').click();
+  find(f.body, 'button', 'No, accidental wake').click();
+  find(f.body, 'button', "I'm not sure").click();
+  const request = find(f.body, 'button', 'Save feedback').click();
   f.entity.value = 'assist_satellite.office'; f.prompt.clear(); resolve({}); await request;
   assert.equal(f.calls[0].entity_id, 'assist_satellite.kitchen');
   assert.equal(f.calls[0].word_present, 'uncertain');
   assert.equal(f.body.querySelectorAll('section').length, 0);
+});
+
+test('touch feedback supports an accidental wake with the word present and changing intent', async () => {
+  const f = await fixture();
+  f.prompt.notify({ id: 'tv', entity_id: f.entity.value }); f.advance(1100); f.prompt.tick();
+  assert.equal(f.body.querySelectorAll('select').length, 0, 'All choices use direct touch targets');
+  find(f.body, 'button', 'Yes, on purpose').click();
+  find(f.body, 'button', 'Yes, I heard it').click();
+  assert.equal(find(f.body, 'button', 'Yes, I heard it').attributes['aria-pressed'], 'true');
+  assert.equal(find(f.body, 'button', 'Yes, I heard it').focused, true, 'Selection keeps keyboard focus in the touch choices');
+  find(f.body, 'button', 'Back').click();
+  find(f.body, 'button', 'No, accidental wake').click();
+  assert.equal(find(f.body, 'button', 'Yes, I heard it').attributes['aria-pressed'], 'true', 'Back preserves the independent presence answer');
+  await find(f.body, 'button', 'Save feedback').click();
+  assert.equal(f.calls[0].label, 'false_trigger');
+  assert.equal(f.calls[0].word_present, 'present', 'Accidental wakes can contain the actual word');
+});
+
+test('touch feedback requires explicit presence, preserves answers after failure, and prevents duplicate saves', async () => {
+  const f = await fixture(); let reject;
+  f.server.response = () => new Promise((_, fail) => { reject = fail; });
+  f.prompt.notify({ id: 'retry', entity_id: f.entity.value }); f.advance(1100); f.prompt.tick();
+  find(f.body, 'button', 'No, accidental wake').click();
+  find(f.body, 'button', 'Save feedback').click();
+  assert.equal(f.calls.length, 0);
+  find(f.body, 'button', 'No, just other sounds').click();
+  const submit = find(f.body, 'button', 'Save feedback');
+  const request = submit.click(); submit.click();
+  find(f.body, 'button', 'Saving…').click();
+  assert.equal(f.calls.length, 1, 'Both stale and visible buttons must reject double taps');
+  assert.equal(find(f.body, 'button', 'Back').disabled, true);
+  assert.equal(find(f.body, 'button', 'Review later').disabled, true, 'Do not promise to defer a save already in flight');
+  f.advance(29000); reject(new Error('Connection lost')); await request;
+  f.advance(2000); f.prompt.tick();
+  assert.equal(f.body.querySelectorAll('section').length, 1, 'A failed request leaves time to retry');
+  assert.match(f.body.textContent, /Your answers are still here/);
+  assert.equal(find(f.body, 'button', 'No, just other sounds').attributes['aria-pressed'], 'true');
+  assert.equal(find(f.body, 'button', 'Save feedback').focused, true, 'A retry is reachable without losing keyboard position');
+  f.server.response = async () => ({});
+  await find(f.body, 'button', 'Save feedback').click();
+  assert.equal(f.calls.length, 2);
+  assert.equal(f.calls[1].label, 'false_trigger'); assert.equal(f.calls[1].word_present, 'absent');
+  assert.equal(f.body.querySelectorAll('section').length, 0);
+});
+
+test('second feedback step remains optional and a new voice turn dismisses it without saving', async () => {
+  const f = await fixture();
+  for (const action of ['later', 'voice']) {
+    f.prompt.notify({ id: action, entity_id: f.entity.value }); f.advance(1100); f.prompt.tick();
+    find(f.body, 'button', "I'm not sure").click();
+    find(f.body, 'button', 'No, just other sounds').click();
+    if (action === 'later') find(f.body, 'button', 'Review later').click();
+    else { f.session.currentState = 'STT'; f.prompt.tick(); }
+    assert.equal(f.body.querySelectorAll('section').length, 0);
+  }
+  assert.equal(f.calls.length, 0);
+});
+
+test('a late failed save cannot replace feedback for a newer recording', async () => {
+  const f = await fixture(); let reject;
+  f.server.response = () => new Promise((_, fail) => { reject = fail; });
+  f.prompt.notify({ id: 'old', entity_id: f.entity.value }); f.advance(1100); f.prompt.tick();
+  find(f.body, 'button', 'Yes, on purpose').click(); find(f.body, 'button', "I'm not sure").click();
+  const request = find(f.body, 'button', 'Save feedback').click();
+  f.prompt.clear();
+  f.prompt.notify({ id: 'new', entity_id: f.entity.value }); f.advance(1100); f.prompt.tick();
+  reject(new Error('Old connection failure')); await request;
+  assert.equal(f.body.querySelectorAll('section').length, 1);
+  assert.ok(find(f.body, 'button', 'Yes, on purpose'), 'New feedback remains on its first step');
+  assert.doesNotMatch(f.body.textContent, /Old connection failure/);
 });
 
 test('stale entity list response cannot replace the newly selected satellite', async () => {

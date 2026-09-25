@@ -190,6 +190,8 @@ class VoiceSatelliteEntity(AssistSatelliteEntity):
 
         # Satellite event subscription (Phase 2 - direct push to card)
         self._satellite_subscribers: list[tuple[Any, int]] = []
+        self._runtime_id: str | None = None
+        self._runtime_user_id: str | None = None
 
     @property
     def available(self) -> bool:
@@ -1532,11 +1534,21 @@ class VoiceSatelliteEntity(AssistSatelliteEntity):
 
     @callback
     def register_satellite_subscription(
-        self, connection, msg_id: int
-    ) -> None:
-        """Register a WS subscriber for satellite events."""
+        self, connection, msg_id: int, runtime_id: str | None = None
+    ) -> bool:
+        """Claim this station for one runtime, allowing its socket to reconnect.
+
+        Native audio uses a second socket, so the page's runtime identity is
+        also bound to its authenticated HA user. It is not a credential.
+        """
+        if self._satellite_subscribers and not self.is_runtime_owner(connection, runtime_id):
+            return False
         was_empty = not self._satellite_subscribers
-        self._satellite_subscribers.append((connection, msg_id))
+        self._runtime_id = runtime_id
+        self._runtime_user_id = connection.user.id if connection.user else None
+        # A reconnect/re-subscribe replaces the old registration atomically.
+        # Its delayed unsubscribe must never remove this newer registration.
+        self._satellite_subscribers = [(connection, msg_id)]
         _LOGGER.debug(
             "Satellite subscription registered for '%s' (msg_id=%d, total=%d)",
             self._satellite_name,
@@ -1547,6 +1559,20 @@ class VoiceSatelliteEntity(AssistSatelliteEntity):
         if was_empty:
             self.async_write_ha_state()
             self._update_media_player_availability()
+        return True
+
+    @callback
+    def is_runtime_owner(self, connection, runtime_id: str | None = None) -> bool:
+        """Whether this page or its authenticated native transport owns us."""
+        if self.has_satellite_subscriber(connection):
+            return True
+        return bool(
+            self._satellite_subscribers
+            and runtime_id
+            and runtime_id == self._runtime_id
+            and connection.user
+            and connection.user.id == self._runtime_user_id
+        )
 
     @callback
     def has_satellite_subscriber(self, connection) -> bool:
@@ -1568,6 +1594,8 @@ class VoiceSatelliteEntity(AssistSatelliteEntity):
         self, connection, msg_id: int
     ) -> None:
         """Remove a WS subscriber."""
+        if not any(c is connection and m == msg_id for c, m in self._satellite_subscribers):
+            return  # stale socket/message cleanup after a replacement
         self._satellite_subscribers = [
             (c, m)
             for c, m in self._satellite_subscribers
@@ -1583,6 +1611,8 @@ class VoiceSatelliteEntity(AssistSatelliteEntity):
         # Also release any pending blocking events so the entity
         # isn't stuck waiting for a card that disconnected.
         if not self._satellite_subscribers:
+            self._runtime_id = None
+            self._runtime_user_id = None
             self.async_write_ha_state()
             self._update_media_player_availability()
             if self._announce_event is not None:

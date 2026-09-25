@@ -158,6 +158,20 @@ async def async_register_sidebar_panel(hass: HomeAssistant) -> None:
         },
     )
     _LOGGER.debug("Voice Satellite sidebar panel registered")
+    async_register_built_in_panel(
+        hass,
+        component_name="custom",
+        sidebar_title="Wake recordings",
+        sidebar_icon="mdi:playlist-play",
+        frontend_url_path="voice-satellite-recordings",
+        require_admin=True,
+        config={
+            "_panel_custom": {
+                "name": "voice-satellite-recordings-panel",
+                "js_url": panel_url,
+            }
+        },
+    )
 
 
 async def async_unregister_resource(hass: HomeAssistant) -> None:

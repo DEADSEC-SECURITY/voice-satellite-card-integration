@@ -69,58 +69,111 @@ export class RecordingReviewPrompt {
   _show() {
     const card = document.createElement('section');
     card.setAttribute('aria-label', 'Wake word feedback');
-    card.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:10005;width:min(360px,calc(100vw - 32px));box-sizing:border-box;padding:16px;border-radius:12px;background:var(--card-background-color,#fff);color:var(--primary-text-color,#222);box-shadow:0 4px 24px #0005;font:14px sans-serif;';
-    const title = document.createElement('strong');
-    title.textContent = 'Was that wake-up intentional?';
-    const hint = document.createElement('p');
-    hint.textContent = 'Optional feedback. Skip leaves this recording unreviewed.';
-    const recordedAt = this._current.item.metadata?.captured_at || this._current.item.created_at;
-    if (recordedAt && !Number.isNaN(Date.parse(recordedAt))) {
-      hint.textContent = `Wake at ${new Date(recordedAt).toLocaleTimeString()}. ${hint.textContent}`;
-    }
-    const presenceLabel = document.createElement('label');
-    presenceLabel.textContent = 'Did the recording contain your wake word? ';
-    const presence = document.createElement('select');
-    presence.setAttribute('aria-label', 'Wake word present in recording');
-    for (const [value, text] of [['uncertain', 'Not sure'], ['present', 'Present'], ['absent', 'Absent']]) {
-      const option = document.createElement('option');
-      option.value = value; option.textContent = text; presence.appendChild(option);
-    }
-    presence.value = 'uncertain';
-    presenceLabel.appendChild(presence);
-    const actions = document.createElement('div');
-    actions.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;';
-    const error = document.createElement('div');
-    error.setAttribute('role', 'status');
-    const makeButton = (text, action) => {
+    // A bottom card without a backdrop or focus trap leaves the next voice turn available.
+    card.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:max(12px,env(safe-area-inset-bottom));z-index:10005;width:min(520px,calc(100% - 24px));max-height:calc(100vh - 24px);max-height:calc(100dvh - 24px);overflow:auto;box-sizing:border-box;padding:20px;border:1px solid var(--divider-color,#d7e1e8);border-radius:24px;background:var(--card-background-color,#fff);color:var(--primary-text-color,#222);box-shadow:0 8px 40px #0005;font:16px/1.4 var(--paper-font-body1_-_font-family,Arial,sans-serif);';
+    const current = this._current;
+    const generation = this._generation;
+    const state = { step: 1, label: null, presence: null, saving: false, error: '' };
+    const isCurrent = () => !this._destroyed && this._generation === generation && this._current === current;
+    const touch = () => { current.shownAt = Date.now(); };
+    const makeButton = (text, action, primary = false) => {
       const button = document.createElement('button');
       button.type = 'button'; button.textContent = text;
-      button.style.cssText = 'min-height:40px;padding:6px 12px;cursor:pointer;';
-      button.addEventListener('click', action);
-      actions.appendChild(button);
+      button.style.cssText = `min-height:56px;box-sizing:border-box;padding:12px 16px;border:2px solid ${primary ? 'var(--primary-color,#0288d1)' : 'var(--divider-color,#c8d4dd)'};border-radius:14px;background:${primary ? 'var(--primary-color,#0288d1)' : 'var(--card-background-color,#fff)'};color:${primary ? 'var(--text-primary-color,#fff)' : 'var(--primary-text-color,#222)'};font:inherit;font-weight:600;line-height:1.35;cursor:pointer;touch-action:manipulation;`;
+      button.disabled = state.saving;
+      if (button.disabled) button.style.opacity = '0.55';
+      button.addEventListener('click', () => {
+        if (!isCurrent() || state.saving) return;
+        touch();
+        return action();
+      });
       return button;
     };
-    const feedbackButtons = [];
-    for (const [label, text] of [['correct', 'Correct wake'], ['false_trigger', 'False wake'], ['unsure', 'Unsure']]) {
-      feedbackButtons.push(makeButton(text, async () => {
-        const current = this._current;
-        if (!current) return;
-        const generation = this._generation;
-        feedbackButtons.forEach(button => { button.disabled = true; });
-        try {
-          await this._getHass().callWS({ type: 'voice_satellite/recordings/label',
-            entity_id: current.item.entity_id, recording_id: current.item.id, label, word_present: presence.value });
-          emitRecordingsUpdated(current.item.entity_id);
-          if (generation === this._generation) this._dismiss();
-        } catch (failure) {
-          if (generation !== this._generation) return;
-          error.textContent = `Feedback was not saved: ${failure?.message || String(failure)}`;
-          feedbackButtons.forEach(button => { button.disabled = false; });
+    const save = async () => {
+      if (!state.label || !state.presence) return;
+      state.saving = true;
+      state.error = '';
+      render();
+      try {
+        await this._getHass().callWS({ type: 'voice_satellite/recordings/label',
+          entity_id: current.item.entity_id, recording_id: current.item.id,
+          label: state.label, word_present: state.presence });
+        emitRecordingsUpdated(current.item.entity_id);
+        if (isCurrent()) this._dismiss();
+      } catch (failure) {
+        if (!isCurrent()) return;
+        state.saving = false;
+        state.error = `Could not save. Your answers are still here. Try again. ${failure?.message || String(failure)}`;
+        touch();
+        render('save');
+      }
+    };
+    const render = (focus = '') => {
+      card.replaceChildren();
+      card.setAttribute('aria-busy', String(state.saving));
+      let focusTarget = null;
+      const progress = document.createElement('p');
+      progress.style.cssText = 'margin:0 0 8px;color:var(--secondary-text-color,#526573);font-size:14px;font-weight:600;';
+      progress.textContent = `Wake feedback · ${state.step} of 2`;
+      const recordedAt = current.item.metadata?.captured_at || current.item.created_at;
+      if (recordedAt && !Number.isNaN(Date.parse(recordedAt))) {
+        progress.textContent += ` · ${new Date(recordedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+      }
+      const title = document.createElement('h2');
+      title.style.cssText = 'margin:0 0 8px;font-size:24px;line-height:1.25;';
+      title.textContent = state.step === 1 ? 'Did you mean to wake me?' : 'Was the wake word said?';
+      title.tabIndex = -1;
+      if (focus === 'heading') focusTarget = title;
+      const hint = document.createElement('p');
+      hint.style.cssText = 'margin:0 0 20px;color:var(--secondary-text-color,#526573);';
+      hint.textContent = state.step === 1
+        ? 'A quick check helps improve wake detection. You can also review this later.'
+        : 'Count voices from a TV or someone else, too. Unsure is okay.';
+      const choices = document.createElement('div');
+      choices.setAttribute('role', 'group');
+      choices.setAttribute('aria-label', title.textContent);
+      choices.style.cssText = 'display:grid;gap:10px;';
+      if (state.step === 1) {
+        for (const [label, text] of [['correct', 'Yes, on purpose'], ['false_trigger', 'No, accidental wake'], ['unsure', "I'm not sure"]]) {
+          choices.appendChild(makeButton(text, () => { state.label = label; state.step = 2; state.error = ''; render('heading'); }));
         }
-      }));
-    }
-    makeButton('Skip', () => this._dismiss());
-    card.append(title, hint, presenceLabel, actions, error);
+      } else {
+        for (const [presence, text] of [['present', 'Yes, I heard it'], ['absent', 'No, just other sounds'], ['uncertain', "I'm not sure"]]) {
+          const button = makeButton(text, () => { state.presence = presence; state.error = ''; render('choice'); });
+          button.setAttribute('aria-pressed', String(state.presence === presence));
+          if (state.presence === presence) {
+            button.style.borderColor = 'var(--primary-color,#0288d1)';
+            button.style.boxShadow = 'inset 0 0 0 1px var(--primary-color,#0288d1)';
+            if (focus === 'choice') focusTarget = button;
+          }
+          choices.appendChild(button);
+        }
+      }
+      card.append(progress, title, hint, choices);
+      if (state.step === 2) {
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:grid;grid-template-columns:1fr 2fr;gap:10px;margin-top:20px;';
+        actions.appendChild(makeButton('Back', () => { state.step = 1; state.error = ''; render('heading'); }));
+        const submit = makeButton(state.saving ? 'Saving…' : 'Save feedback', save, true);
+        submit.style.padding = '12px';
+        submit.disabled = state.saving || !state.presence;
+        if (submit.disabled) submit.style.opacity = '0.55';
+        if (focus === 'save') focusTarget = submit;
+        actions.appendChild(submit);
+        card.appendChild(actions);
+      }
+      const later = makeButton('Review later', () => this._dismiss());
+      later.style.cssText += 'width:100%;margin-top:10px;border-color:transparent;background:transparent;color:var(--secondary-text-color,#526573);';
+      card.appendChild(later);
+      const status = document.createElement('div');
+      status.setAttribute('role', 'status');
+      status.style.cssText = 'color:var(--error-color,#b42318);overflow-wrap:anywhere;';
+      status.textContent = state.error;
+      card.appendChild(status);
+      // Only move focus after a deliberate answer; never steal it when feedback first appears.
+      focusTarget?.focus({ preventScroll: true });
+    };
+    render();
     (this._host || document.body).appendChild(card);
     this._element = card;
   }

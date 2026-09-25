@@ -31,6 +31,7 @@ import { ScreensaverManager } from '../screensaver';
 import { DiagnosticsManager } from '../diagnostics';
 import { ToastManager } from '../toast';
 import { TriggerRecorder } from '../recordings/index.js';
+import { captureId as createRuntimeId } from '../recordings/capture.js';
 import { subscribeSatelliteEvents, teardownSatelliteSubscription } from '../shared/satellite-subscription.js';
 import { dispatchSatelliteEvent, checkRemoteNotificationPlayback } from '../shared/satellite-notification.js';
 import { isEditorPreview } from '../editor/preview.js';
@@ -92,6 +93,8 @@ export class VoiceSatelliteSession {
     this._starting = false;
     this._startInflight = null;
     this._startAttempted = false;
+    this._runtimeId = createRuntimeId();
+    this._runtimeClaimed = false;
     this._lastSyncedSatelliteState = null;
     this._imageLingerTimeout = null;
     this._mediaLingerDismiss = null;
@@ -180,7 +183,7 @@ export class VoiceSatelliteSession {
     return this._connection;
   }
 
-  /** Session is always the "owner" - there's no ownership model. */
+  /** Cards in this page share one session; the server arbitrates devices. */
   get isOwner() { return true; }
 
   /** True if any registered card wants the reactive bar. */
@@ -313,7 +316,7 @@ export class VoiceSatelliteSession {
     if (hass.connection) {
       this._connection = hass.connection;
     }
-    this._recordings.update();
+    if (this._runtimeClaimed) this._recordings.update();
 
     if (this._hasStarted) {
       // Lovelace cards mounted from tool results need the same live hass
@@ -419,8 +422,8 @@ export class VoiceSatelliteSession {
     }
 
     // If entity changed while running, restart
-    if (oldEntity && this._config.satellite_entity
-        && oldEntity !== this._config.satellite_entity && this._hasStarted) {
+    if (oldEntity && oldEntity !== this._config.satellite_entity
+        && (this._hasStarted || this._starting || this._runtimeClaimed)) {
       this._logger.log('session', `Entity changed: ${oldEntity} → ${this._config.satellite_entity}`);
       this.teardown();
       return;
@@ -453,7 +456,7 @@ export class VoiceSatelliteSession {
     }
 
     this._syncFullCardSuppression();
-    this._recordings.update();
+    if (this._runtimeClaimed) this._recordings.update();
   }
 
   /**
@@ -501,6 +504,7 @@ export class VoiceSatelliteSession {
   teardown() {
     this._logger.log('session', 'Tearing down session');
     this._recordings.stop();
+    try { this._teardownNativeWake?.(); } catch (e) { this._logger.log('session', `native wake teardown: ${e.message || e}`); }
     if (this._imageLingerTimeout) {
       clearTimeout(this._imageLingerTimeout);
       this._imageLingerTimeout = null;
@@ -529,6 +533,20 @@ export class VoiceSatelliteSession {
     this._starting = false;
     this._startAttempted = false;
     this._lastSyncedSatelliteState = null;
+  }
+
+  handleRuntimeConflict() {
+    // A laptop selecting an occupied station must never stop that station.
+    // Stop this rejected runtime and require an explicit Start to retry.
+    this._userStopped = true;
+    this.teardown();
+    this.currentState = State.IDLE;
+    this._uiProxy.hideBar();
+    this._uiProxy.showStartButton();
+    this._toast.show({
+      id: 'session.in-use', severity: 'warn', category: 'Station already running',
+      description: 'This station is active on another device. Open Wake recordings to review its clips. To move the station here, stop it on the other device first, then press Start.',
+    });
   }
 
   // ── Wake word lazy loading ─────────────────────────────────────

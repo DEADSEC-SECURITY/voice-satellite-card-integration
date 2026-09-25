@@ -368,6 +368,26 @@ class RecordingStore:
             rows.sort(key=lambda row: (row["created_at"], row["id"]), reverse=True)
             return {"items": rows[offset:offset + limit], "total": len(rows), "config": config}
 
+    def review_list(self, stations: list[dict], label: str | None = None, limit: int = 50, offset: int = 0) -> dict:
+        """One globally ordered page from server-resolved station identities."""
+        with self._lock:
+            if label is not None and label not in LABELS:
+                _invalid("Invalid review label.")
+            if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or not 0 <= offset <= 1000000:
+                _invalid("Invalid recording page.")
+            rows = []
+            configs = {}
+            for station in stations:
+                owner = station["owner"]
+                config = self.config(owner)
+                configs[station["entity_id"]] = config
+                self._prune(owner, config)
+                rows.extend({**row, "entity_id": station["entity_id"], "station_name": station["name"]}
+                            for row in self._rows(owner) if label is None or row["label"] == label)
+            rows.sort(key=lambda row: (row["created_at"], row["entity_id"], row["id"]), reverse=True)
+            return {"items": rows[offset:offset + limit], "total": len(rows),
+                    "config": configs[stations[0]["entity_id"]] if len(stations) == 1 else None}
+
     def get(self, owner: str, recording_id: str) -> dict:
         with self._lock:
             self._prune(owner, self.config(owner))

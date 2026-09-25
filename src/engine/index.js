@@ -146,6 +146,8 @@ async function bootstrapEngine() {
  */
 async function attemptStart(hass, session) {
   if (session.isStarted) return;
+  // Reviewing on a laptop must not revive an old station assignment.
+  if (window.location.pathname.replace(/\/$/, '') === '/voice-satellite-recordings') return;
   if (session._starting) return;
   if (session._userStopped) return;
   if (session._serverConfigHydrating) return;
@@ -162,6 +164,9 @@ async function attemptStart(hass, session) {
       session._serverConfigHydrating = false;
     }
   }
+
+  // Navigation can happen while the server profile is loading.
+  if (window.location.pathname.replace(/\/$/, '') === '/voice-satellite-recordings') return;
 
   // Respect auto_start after server-backed settings have had a chance to
   // rehydrate the local cache.
@@ -185,7 +190,7 @@ async function attemptStart(hass, session) {
   // it gracefully and shows the start button for the user to tap.
   if (!session.isStarted && !session._startAttempted) {
     requestAnimationFrame(() => {
-      if (!session.isStarted) {
+      if (!session.isStarted && window.location.pathname.replace(/\/$/, '') !== '/voice-satellite-recordings') {
         session.start();
       }
     });

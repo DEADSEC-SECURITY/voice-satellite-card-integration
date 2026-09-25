@@ -17,6 +17,7 @@
       <label><input type="checkbox" id="fixture-admin" checked> Administrator</label>
       <label>Voice state <select id="fixture-state"><option>LISTENING</option><option>STT</option><option>TTS</option><option>IDLE</option></select></label>
       <button type="button" id="fixture-wake">Simulate wake</button>
+      <button type="button" id="fixture-feedback">Preview feedback popup</button>
       <button type="button" id="fixture-fail">Fail next request</button>
     </div>
     <div id="fixture-status" role="status"></div>
@@ -101,6 +102,13 @@
   $('fixture-admin').addEventListener('change',event=>{hass.user.is_admin=event.target.checked;review.clear();panel.update();});
   $('fixture-state').addEventListener('change',event=>{session.currentState=event.target.value;session.tts.isPlaying=session.currentState==='TTS';review.tick();});
   $('fixture-wake').addEventListener('click',()=>{try{saveFixture('wake');}catch(error){status(error.message);}});
+  $('fixture-feedback').addEventListener('click',()=>{
+    review.clear();
+    session.currentState='LISTENING';session.tts.isPlaying=false;$('fixture-state').value='LISTENING';
+    const item=clip();stores.get(localEntity).items.unshift(item);
+    emitRecordingsUpdated(localEntity);review.notify({...item,entity_id:localEntity});
+    status('Showing the optional touch feedback flow. Review later leaves this fixture unreviewed.');
+  });
   $('fixture-fail').addEventListener('click',()=>{failNext=true;status('The next fixture request will fail.');});
   setInterval(()=>{review.tick();panel.update();},250);
   window.addEventListener('beforeunload',()=>{panel.destroy();review.destroy();});

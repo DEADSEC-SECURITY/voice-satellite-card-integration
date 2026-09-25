@@ -37,6 +37,13 @@ export async function loadPanelConfig(hass, entityId) {
         keys: Object.keys(result?.config || {}).length,
       },
     );
+    // Starting this browser is a local preference, even when it displays a
+    // shared station profile. A laptop Stop/auto-start choice must not change
+    // the tablet's startup behavior on its next reload.
+    if (result?.config) {
+      result.config = { ...result.config };
+      delete result.config.auto_start;
+    }
     return result;
   } catch (err) {
     debugLog('Failed to hydrate profile from Home Assistant', {
@@ -50,10 +57,12 @@ export async function loadPanelConfig(hass, entityId) {
 export async function savePanelConfig(hass, entityId, config) {
   if (!hass?.connection || !entityId || !config) return false;
   try {
+    const shared = { ...config, satellite_entity: entityId };
+    delete shared.auto_start;
     await hass.connection.sendMessagePromise({
       type: 'voice_satellite/save_panel_settings',
       entity_id: entityId,
-      config: Object.assign({}, config, { satellite_entity: entityId }),
+      config: shared,
     });
     debugLog('Pushed profile to Home Assistant', {
       entity_id: entityId,

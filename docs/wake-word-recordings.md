@@ -7,14 +7,21 @@ not train a model, replace a model, or send audio to a training service.
 
 ## Enable recording
 
-1. Open the **Voice Satellite** sidebar panel as a Home Assistant administrator.
-2. Select the satellite whose recordings you want to manage.
-3. Find **Wake recordings** and choose a mode:
+1. Open the **Wake recordings** sidebar item as a Home Assistant administrator
+   (`/voice-satellite-recordings`).
+2. Choose a specific station in the inbox. **All stations** is for combined review;
+   select one station to change its recording policy.
+3. Choose a recording mode:
    - **Off**: do not collect new clips.
    - **Save**: save triggered clips for review later.
    - **Save + feedback**: also show a short, silent feedback card after the voice
      interaction and spoken response finish.
 4. Set the retention period and storage limit, then select **Apply settings**.
+
+Choosing a station here only filters the inbox. It does not assign this browser
+to that station or start a microphone. **Voice Satellite / This device** controls
+the local voice runtime separately. Auto start is also local to each browser, so
+changing it on a review laptop does not change a tablet's startup preference.
 
 The default policy is seven days and 250 MB per satellite. The server accepts
 1–365 days and 1–2048 MB. Retention applies to both reviewed and unreviewed clips.
@@ -22,9 +29,15 @@ When storage is full, new saves fail visibly; existing clips are not silently
 removed to make space. Lowering a policy can remove recordings that have aged
 beyond the selected retention period.
 
-For native wake detection, the tablet needs a Kiosk Satellite build that supports
-the wake recording API. An older app is shown as unavailable. Installing the Home
-Assistant frontend alone does not add native capture support to an older app.
+For native wake detection, install a matching Kiosk Satellite build that supports
+both the recording API and forwarding the page's station runtime identity before
+updating the HA integration. An older app may lack capture support or fail native
+voice requests. Installing the HA frontend alone cannot update the native app.
+
+Only one device can run a station at a time. A second device trying to start that
+station is directed to **Wake recordings** instead of taking it over. To move a
+station deliberately, stop it on the current device, then press Start on the new
+one. Reviewing its audio does not require moving the station.
 
 When settings are changed from another device, an active recorder can take up to
 30 seconds to refresh its policy. A suspended tablet WebView applies the change
@@ -55,6 +68,10 @@ it does not mean the clip has been reviewed.
 
 ## Review a recording
 
+Open **Wake recordings** and choose **All stations** or one station. The combined
+inbox shows each clip's station and pages through the merged results, newest first.
+The selected station is independent of the browser's **This device** assignment.
+
 Use **Listen** to load a clip through your authenticated Home Assistant connection,
 then press play in the audio control. Nothing plays automatically.
 
@@ -74,11 +91,16 @@ still acoustically present. Marking a wake as false does not automatically mark
 the audio as a negative training example.
 
 In **Save + feedback**, the optional card waits until Assist is no longer speaking
-or interacting. It does not speak or block the next voice turn. **Skip**, expiry,
-or a new interaction leaves the clip unreviewed. The feedback queue is bounded;
-clips can still be reviewed in the panel if a prompt is skipped. Administrators
-can review older clips using the filter and page controls. **Delete** removes the
-selected clip and its review after confirmation.
+or interacting. Its large touch buttons first ask **Did you mean to wake me?**,
+then independently ask **Was the wake word said?** Choose both answers and tap
+**Save feedback**; **Back** lets you change an answer. A failed save retains your
+answers so you can retry.
+
+The card does not speak or block the next voice turn. **Review later**, expiry,
+or a new interaction leaves unsent feedback unreviewed. The feedback queue is
+bounded; clips remain available in the inbox when a prompt is skipped.
+Administrators can review older clips using the filter and page controls.
+**Delete** removes the selected clip and its review after confirmation.
 
 ## Capture a missed wake
 
@@ -111,16 +133,24 @@ after it has learned from these examples.
    the recording upload.
 3. Trigger a known false wake and label it without assuming the word is absent.
 4. Enable **Save + feedback** and confirm the card appears only after the response.
-   Skip one prompt and verify its clip remains unreviewed.
-5. Try a missed-wake capture on the tablet, then open the panel on another device
-   and verify manual capture is unavailable there for that tablet.
-6. Export reviewed examples, inspect their labels, and download a WAV.
-7. Turn recording **Off** and verify new voice interactions create no new clips.
+   Complete both questions once, then choose Review later on another prompt and
+   verify that clip remains unreviewed.
+5. On a laptop, review the tablet and All stations in **Wake recordings**. Verify
+   the tablet still responds, saves clips, and asks for feedback. A deliberate
+   attempt to start the laptop as that active station must be rejected without
+   interrupting the tablet. Clear the laptop's test assignment afterward.
+6. Briefly disconnect/reconnect the tablet and reload its WebView. Verify a new
+   wake works and each queued clip appears once under the correct station.
+7. Try a missed-wake capture on the tablet, then verify capture is unavailable
+   for that tablet from the laptop review page.
+8. Export reviewed examples, inspect their labels, and download a WAV.
+9. Turn recording **Off** and verify new voice interactions create no new clips.
 
 Native capture and tablet behavior need an actual supported app build and device
 trial. Unit tests and a successful frontend build do not establish device behavior.
 
 For frontend development, `tools/recordings-preview.html` mounts the actual panel
-and feedback controller against a local fixture server object. Serve the repository
-over localhost and open that file. All its audio is a generated test tone; it does
-not connect to Home Assistant or open a microphone.
+and feedback controller against a local fixture server object; **Preview feedback
+popup** opens the touch flow. `tools/recordings-inbox-preview.html` exercises the
+standalone inbox. Serve the repository over localhost and open either file. All
+fixture audio is generated; neither connects to HA or opens a microphone.

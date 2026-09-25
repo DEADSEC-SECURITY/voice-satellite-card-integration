@@ -43,6 +43,7 @@ import { exportLogBufferText } from '../logger.js';
 import { redactText } from '../shared/redact.js';
 import { getAudioInputDeviceOptions } from '../audio/devices.js';
 import { RecordingsPanel } from '../recordings/panel.js';
+import { navigateReviewLink } from '../recordings/page.js';
 
 const P = 'vsp';
 const CONFIG_KEY = 'vs-panel-config';
@@ -422,6 +423,8 @@ class VoiceSatellitePanel extends HTMLElement {
       }
       this._config = Object.assign({}, DEFAULT_CONFIG, result.config || {}, {
         satellite_entity: entityId,
+        // Startup belongs to this browser, not the shared station profile.
+        auto_start: this._config.auto_start,
       });
       if (!this._config.microphone_device_id) this._config.microphone_device_id = 'default';
       this._persistLocalConfig();
@@ -1812,6 +1815,10 @@ class VoiceSatellitePanel extends HTMLElement {
       </div>
 
       <div class="${P}-content">
+      <nav aria-label="Voice Satellite" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px">
+        <span aria-current="page" style="padding:12px 16px">This device</span>
+        <a class="${P}-recordings-link" href="/voice-satellite-recordings" style="display:inline-block;padding:12px 16px;border:1px solid var(--divider-color);border-radius:8px;color:var(--primary-color);text-decoration:none">Recordings review</a>
+      </nav>
       <div class="${P}-card">
         <div class="${P}-engine-layout">
           <div class="${P}-engine-info">
@@ -2021,6 +2028,7 @@ class VoiceSatellitePanel extends HTMLElement {
     `;
 
     // Set up menu button (HA built-in, handles sidebar toggle)
+    this.querySelector(`.${P}-recordings-link`)?.addEventListener('click', event => navigateReviewLink(event, '/voice-satellite-recordings'));
     const menuBtn = this.querySelector(`.${P}-menu-btn`);
     if (menuBtn) {
       menuBtn.hass = this._hass;
