@@ -6,6 +6,7 @@ const VISIBLE_MS = 30000;
 
 export function canShowRecordingReview(session) {
   return !!session && session.isStarted !== false && READY_STATES.has(session.currentState)
+    && !session.wakeWord?.isPlaybackSuspended
     && !session.tts?.isPlaying && !session.announcement?.playing && !session.askQuestion?.playing
     && !session.startConversation?.playing && !session.timer?.alertActive && !session._followupDelayTimer;
 }

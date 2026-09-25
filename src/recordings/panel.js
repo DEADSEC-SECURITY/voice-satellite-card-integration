@@ -52,9 +52,10 @@ export class RecordingsPanel {
     this._entity = null; this._items = []; this._total = 0; this._offset = 0;
     this._filter = ''; this._config = { mode: 'off', retention_days: 7, max_storage_mb: 250 };
     this._sequence = 0; this._entityEpoch = 0; this._urls = new Set(); this._mounted = false; this._busy = false;
+    this._players = new Map();
     this._onUpdated = event => {
       if (event.detail?.entity_id !== this._entity || this._busy) return;
-      if (this._host.querySelector('audio')?.paused === false) this._refreshPending = true;
+      if (this._isPlaying()) this._refreshPending = true;
       else this.refresh();
     };
   }
@@ -77,7 +78,7 @@ export class RecordingsPanel {
       this._render();
       if (entity && admin) this.refresh();
     }
-    if (this._refreshPending && !this._busy && this._host.querySelector('audio')?.paused !== false) {
+    if (this._refreshPending && !this._busy && !this._isPlaying()) {
       this._refreshPending = false; this.refresh();
     }
     this._updateCaptureStatus();
@@ -157,14 +158,67 @@ export class RecordingsPanel {
     try {
       const data = await this._ws('get', { recording_id: item.id }, entityId);
       if (!this._mounted || entityId !== this._entity || !target.isConnected) return;
+      this._disposePlayers(target);
       const url = URL.createObjectURL(recordingBlob(data.audio_base64));
       this._urls.add(url);
       const audio = element('audio'); audio.controls = true; audio.src = url;
       audio.setAttribute('aria-label', 'Saved wake recording');
+      this._trackPlayer(audio, target, url);
       target.replaceChildren(audio);
       // Playback requires a user's explicit action; never auto-play a captured clip.
     } catch (error) {
-      if (this._mounted && entityId === this._entity) target.textContent = `Unable to load recording: ${error?.message || String(error)}`;
+      if (this._mounted && entityId === this._entity && target.isConnected) {
+        this._disposePlayers(target);
+        target.textContent = `Unable to load recording: ${error?.message || String(error)}`;
+      }
+    }
+  }
+
+  _isPlaying() { return [...this._players.keys()].some(audio => audio.paused === false); }
+
+  _trackPlayer(audio, target, url) {
+    const player = { target, url, heldSession: null, heldWakeWord: null, disposed: false };
+    player.release = () => {
+      const wakeWord = player.heldWakeWord;
+      const session = player.heldSession;
+      player.heldWakeWord = null; player.heldSession = null;
+      if (!wakeWord) return;
+      // Release this player's own reference only, even after the selected
+      // satellite or session changes. TTS may still hold another reference.
+      wakeWord.resumeFromPlayback();
+      session.recordings?.review?.tick();
+    };
+    player.start = () => {
+      if (player.disposed || player.heldWakeWord) return;
+      // The local microphone hears playback even when reviewing a remote
+      // satellite. Resolve the local session when Play is pressed, not on load.
+      const session = this._getSession();
+      const wakeWord = session?.wakeWord;
+      if (typeof wakeWord?.suspendForPlayback !== 'function' || typeof wakeWord?.resumeFromPlayback !== 'function') return;
+      player.heldSession = session; player.heldWakeWord = wakeWord;
+      wakeWord.suspendForPlayback();
+      session.recordings?.review?.tick();
+    };
+    audio.addEventListener('play', player.start);
+    for (const event of ['pause', 'ended', 'error']) audio.addEventListener(event, player.release);
+    this._players.set(audio, player);
+  }
+
+  _disposePlayers(target) {
+    for (const [audio, player] of this._players) {
+      if (target && player.target !== target) continue;
+      player.disposed = true;
+      // Removing/replacing an audio element does not reliably stop playback.
+      // Pause while it is still attached, then balance our hold explicitly in
+      // case the browser delivers its pause event asynchronously.
+      try { audio.pause(); } finally {
+        try { player.release(); } finally {
+          audio.removeEventListener('play', player.start);
+          for (const event of ['pause', 'ended', 'error']) audio.removeEventListener(event, player.release);
+          URL.revokeObjectURL(player.url); this._urls.delete(player.url);
+          this._players.delete(audio);
+        }
+      }
     }
   }
 
@@ -204,6 +258,7 @@ export class RecordingsPanel {
 
   _render() {
     if (!this._mounted) return;
+    this._disposePlayers();
     this._urls.forEach(url => URL.revokeObjectURL(url)); this._urls.clear();
     const root = element('div', undefined, 'vsp-recordings');
     const style = element('style');
@@ -280,6 +335,7 @@ export class RecordingsPanel {
   destroy() {
     this._mounted = false; this._sequence += 1; this._entityEpoch += 1;
     window.removeEventListener('voice-satellite-recordings-updated', this._onUpdated);
+    this._disposePlayers();
     this._urls.forEach(url => URL.revokeObjectURL(url)); this._urls.clear();
     this._host.replaceChildren();
   }

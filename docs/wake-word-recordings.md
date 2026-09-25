@@ -56,8 +56,13 @@ it does not mean the clip has been reviewed.
 ## Review a recording
 
 Use **Listen** to load a clip through your authenticated Home Assistant connection,
-then press play in the audio control. Nothing plays automatically. Select both
-labels deliberately and choose **Save review**:
+then press play in the audio control. Nothing plays automatically.
+
+While a clip plays, wake detection on the playback device is suspended so the
+recorded wake word cannot wake that device again. Pausing, finishing, or leaving
+the review stops this playback hold; any separate spoken-response hold remains.
+
+Select both labels deliberately and choose **Save review**:
 
 - **Correct wake**, **False wake**, **Unsure**, or **Unreviewed** describes the
   detection or your intent.

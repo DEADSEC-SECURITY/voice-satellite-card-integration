@@ -11,6 +11,7 @@ class Element {
   constructor(tag) {
     this.tagName = tag; this.children = []; this.parentNode = null; this.style = {};
     this.attributes = {}; this.listeners = {}; this._text = ''; this.value = ''; this.disabled = false;
+    this.paused = true; this.pauseWhileConnected = [];
   }
   set textContent(value) { this._text = String(value); this.children = []; }
   get textContent() { return this._text + this.children.map(node => node.textContent).join(''); }
@@ -24,6 +25,9 @@ class Element {
   replaceChildren(...nodes) { this.children.forEach(node => { node.parentNode = null; }); this.children = []; this._text = ''; this.append(...nodes); }
   setAttribute(key, value) { this.attributes[key] = value; }
   addEventListener(type, callback) { this.listeners[type] = callback; }
+  removeEventListener(type, callback) { if (this.listeners[type] === callback) delete this.listeners[type]; }
+  play() { this.paused = false; this.listeners.play?.(); return Promise.resolve(); }
+  pause() { this.pauseWhileConnected.push(this.isConnected); this.paused = true; this.listeners.pause?.(); }
   click() { if (!this.disabled) return this.listeners.click?.(); }
   checkValidity() { return Number.isInteger(Number(this.value)) && Number(this.value) >= Number(this.min) && Number(this.value) <= Number(this.max); }
   querySelectorAll(selector) {
@@ -72,11 +76,18 @@ async function fixture() {
   const hass = { user: { is_admin: true }, async callWS(request) { calls.push(request); return server.response(request); } };
   const session = { config: { satellite_entity: entity.value }, currentState: 'LISTENING', isStarted: true, tts: { isPlaying: false },
     recordings: { getStatus: () => ({ available: true, mode: 'save', pending: 0, dropped: 0 }), captureMissed: async () => {}, refreshConfig: async () => {} } };
+  session.wakeWord = {
+    holds: 0, suspends: 0, resumes: 0,
+    get isPlaybackSuspended() { return this.holds > 0; },
+    suspendForPlayback() { this.holds++; this.suspends++; },
+    resumeFromPlayback() { assert.ok(this.holds > 0, 'Playback reference must be balanced'); this.holds--; this.resumes++; },
+  };
   const options = { getHass: () => hass, getEntityId: () => entity.value, getSession: () => session };
   const host = new Element('div'); body.appendChild(host);
   const panel = new module.namespace.RecordingsPanel({ ...options, host });
   panel._download = (blob, filename) => downloads.push({ blob, filename });
   const prompt = new review.RecordingReviewPrompt(options);
+  session.recordings.review = prompt;
   return { ...module.namespace, ...review, panel, prompt, host, body, entity, session, hass, server, calls, revoked, created, downloads, advance: ms => { now += ms; } };
 }
 
@@ -223,6 +234,101 @@ test('late playback response after a satellite change is ignored', async () => {
   f.entity.value = 'assist_satellite.office'; f.panel._entity = f.entity.value;
   resolve({ audio_base64: wav() }); await request;
   assert.equal(f.created.length, 0);
+});
+
+test('review playback suspends the current local microphone even for a remote satellite', async () => {
+  const f = await fixture();
+  f.entity.value = 'assist_satellite.office';
+  f.panel.mount(); await flush();
+  f.server.response = async () => ({ audio_base64: wav(), item: { id: 'remote-clip' } });
+  const target = new Element('div'); f.host.appendChild(target);
+  await f.panel._play({ id: 'remote-clip' }, target, f.entity.value);
+  const player = target.querySelector('audio');
+  assert.equal(f.session.wakeWord.holds, 0, 'Loading alone must not suspend wake detection');
+  const nextWakeWord = { ...f.session.wakeWord };
+  const nextSession = { ...f.session, wakeWord: nextWakeWord };
+  f.panel._getSession = () => nextSession;
+  await player.play();
+  assert.equal(f.session.wakeWord.holds, 0, 'Do not retain a session resolved at audio load');
+  assert.equal(nextWakeWord.holds, 1, 'Resolve the local microphone when Play is pressed');
+  f.panel._getSession = () => f.session;
+  player.pause();
+  assert.equal(nextWakeWord.holds, 0, 'Release the same manager that acquired the hold');
+  assert.equal(f.session.wakeWord.resumes, 0);
+  f.panel.destroy();
+});
+
+test('repeated play and completion balance one player reference without releasing TTS', async () => {
+  const f = await fixture(); f.panel.mount(); await flush();
+  f.server.response = async () => ({ audio_base64: wav(), item: { id: 'clip' } });
+  const target = new Element('div'); f.host.appendChild(target);
+  await f.panel._play({ id: 'clip' }, target, f.entity.value);
+  const player = target.querySelector('audio'), wakeWord = f.session.wakeWord;
+  wakeWord.suspendForPlayback(); // Independent TTS playback reference.
+  await player.play(); player.listeners.play();
+  assert.equal(wakeWord.holds, 2, 'Duplicate play events must not add references');
+  player.pause(); player.listeners.ended(); player.listeners.error();
+  assert.equal(wakeWord.holds, 1, 'Pause/ended/error release our reference exactly once');
+  await player.play(); assert.equal(wakeWord.holds, 2);
+  f.panel.destroy();
+  assert.equal(player.paused, true);
+  assert.equal(player.pauseWhileConnected.at(-1), true, 'Pause before removing the audio element');
+  assert.equal(wakeWord.holds, 1, 'Unmount must leave the TTS reference intact');
+  assert.equal(wakeWord.resumes, 2);
+  assert.equal(Object.keys(player.listeners).length, 0);
+  wakeWord.resumeFromPlayback(); assert.equal(wakeWord.holds, 0);
+});
+
+test('replacement and render stop an existing player and release each hold once', async () => {
+  const f = await fixture(); f.panel.mount(); await flush();
+  f.server.response = async () => ({ audio_base64: wav(), item: { id: 'clip' } });
+  const target = new Element('div'); f.host.appendChild(target);
+  await f.panel._play({ id: 'clip' }, target, f.entity.value);
+  const old = target.querySelector('audio'); await old.play();
+  const stalePlayEvent = old.listeners.play;
+  await f.panel._play({ id: 'replacement' }, target, f.entity.value);
+  assert.equal(old.paused, true); assert.equal(old.pauseWhileConnected.at(-1), true);
+  assert.equal(f.session.wakeWord.holds, 0); assert.equal(f.session.wakeWord.resumes, 1);
+  stalePlayEvent(); assert.equal(f.session.wakeWord.holds, 0, 'A late event on a disposed player cannot reacquire');
+  const next = target.querySelector('audio'); await next.play();
+  f.panel._render();
+  assert.equal(next.paused, true); assert.equal(next.pauseWhileConnected.at(-1), true);
+  assert.equal(f.session.wakeWord.holds, 0); assert.equal(f.session.wakeWord.resumes, 2);
+  assert.deepEqual(f.revoked, ['blob:1', 'blob:2']);
+});
+
+test('playing a reviewed clip dismisses and blocks feedback until playback finishes', async () => {
+  const f = await fixture(); f.panel.mount(); await flush();
+  f.prompt.notify({ id: 'prompt', entity_id: f.entity.value }); f.advance(1100); f.prompt.tick();
+  assert.equal(f.body.querySelectorAll('section').length, 1);
+  f.server.response = async () => ({ audio_base64: wav(), item: { id: 'clip' } });
+  const target = new Element('div'); f.host.appendChild(target);
+  await f.panel._play({ id: 'clip' }, target, f.entity.value);
+  const player = target.querySelector('audio'); await player.play();
+  assert.equal(f.body.querySelectorAll('section').length, 0);
+  assert.equal(f.canShowRecordingReview(f.session), false);
+  player.paused = true; player.listeners.ended();
+  assert.equal(f.session.wakeWord.holds, 0);
+  assert.equal(f.canShowRecordingReview(f.session), true);
+  assert.equal(f.calls.some(call => call.type.endsWith('/label')), false);
+  f.panel.destroy();
+});
+
+test('audio errors release suspension and failed replacement pauses the old clip', async () => {
+  const f = await fixture(); f.panel.mount(); await flush();
+  f.server.response = async () => ({ audio_base64: wav(), item: { id: 'clip' } });
+  const target = new Element('div'); f.host.appendChild(target);
+  await f.panel._play({ id: 'clip' }, target, f.entity.value);
+  const player = target.querySelector('audio'); await player.play();
+  player.listeners.error(); player.listeners.error();
+  assert.equal(f.session.wakeWord.holds, 0); assert.equal(f.session.wakeWord.resumes, 1);
+  await player.play();
+  f.server.response = async () => { throw new Error('Connection lost'); };
+  await f.panel._play({ id: 'replacement' }, target, f.entity.value);
+  assert.equal(player.paused, true); assert.equal(player.pauseWhileConnected.at(-1), true);
+  assert.equal(f.session.wakeWord.holds, 0); assert.equal(f.session.wakeWord.resumes, 2);
+  assert.match(target.textContent, /Connection lost/);
+  f.panel.destroy();
 });
 
 test('non-admin review cannot list or configure audio; invalid audio is rejected', async () => {
