@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches:
+      - main
       - "feature/**"
   workflow_dispatch:
 
@@ -33,6 +34,9 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Check recording code formatting
+        run: npm run check:recordings-format
 
       - name: Build
         run: npm run build

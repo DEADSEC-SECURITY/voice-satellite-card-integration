@@ -1,56 +1,152 @@
 <!doctype html>
 <html lang="en">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Recordings inbox — local preview</title>
-<style>
-  :root{font-family:Arial,sans-serif;--primary-text-color:#17212b;--secondary-text-color:#526573;--card-background-color:#fff;--divider-color:#d7e1e8;--primary-background-color:#f1f5f8;--primary-color:#0288d1;--error-color:#b42318}
-  body{margin:0;background:var(--primary-background-color)}.fixture{padding:12px 20px;background:#e6f4fc;font-size:14px;line-height:1.5;color:#17212b}.fixture button{font:inherit;padding:8px;margin:4px}
-</style>
-<div class="fixture">Local fixture: actual review page, two stations, 31 generated clips. No microphone, device assignment, or Home Assistant connection. Playback is a quiet generated tone.
-  <button id="fail">Fail next request</button><button id="empty">Empty inbox</button><span id="status" role="status"></span>
-</div>
-<voice-satellite-recordings-panel></voice-satellite-recordings-panel>
-<script type="module">
-  import '../src/recordings/page.js';
-  const stations = [{entity_id:'assist_satellite.kitchen',name:'Kitchen tablet'}, {entity_id:'assist_satellite.office',name:'Office tablet'}];
-  const configs = new Map(stations.map(station => [station.entity_id,{mode:'review',retention_days:7,max_storage_mb:250}]));
-  let items = Array.from({length:31},(_,i)=>({id:crypto.randomUUID(),entity_id:stations[i%2].entity_id,station_name:stations[i%2].name,
-    label:['unreviewed','correct','false_trigger'][i%3],word_present:'uncertain',created_at:new Date(Date.now()-i*60000).toISOString(),
-    metadata:{engine:'openWakeWord',model:'Atlas',capture_kind:'wake',origin:'native'}}));
-  let fail = false;
-  const status = text => { document.querySelector('#status').textContent = text; };
-  function toneWav() {
-    const n=8000,buffer=new ArrayBuffer(44+n*2),view=new DataView(buffer);
-    const text=(offset,s)=>[...s].forEach((c,i)=>view.setUint8(offset+i,c.charCodeAt(0)));
-    text(0,'RIFF');view.setUint32(4,36+n*2,true);text(8,'WAVE');text(12,'fmt ');view.setUint32(16,16,true);
-    view.setUint16(20,1,true);view.setUint16(22,1,true);view.setUint32(24,16000,true);view.setUint32(28,32000,true);
-    view.setUint16(32,2,true);view.setUint16(34,16,true);text(36,'data');view.setUint32(40,n*2,true);
-    for(let i=0;i<n;i++)view.setInt16(44+i*2,Math.round(Math.sin(2*Math.PI*220*i/16000)*900),true);
-    return btoa(String.fromCharCode(...new Uint8Array(buffer)));
-  }
-  const hass = {user:{is_admin:true}, async callWS(request){
-    await new Promise(resolve=>setTimeout(resolve,120));
-    if(fail){fail=false;throw new Error('Simulated connection failure. Refresh to retry.');}
-    const command=request.type.split('/').pop();
-    status(`${command} · ${request.entity_id || 'All stations'}`);
-    if(command==='review_list'){
-      const filtered=items.filter(item=>(!request.entity_id||request.entity_id===item.entity_id)&&(!request.label||item.label===request.label));
-      return {items:structuredClone(filtered.slice(request.offset,request.offset+request.limit)),total:filtered.length,stations,config:request.entity_id?configs.get(request.entity_id):null};
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Recordings inbox — local preview</title>
+  <style>
+    :root {
+      font-family: Arial, sans-serif;
+      --primary-text-color: #17212b;
+      --secondary-text-color: #526573;
+      --card-background-color: #fff;
+      --divider-color: #d7e1e8;
+      --primary-background-color: #f1f5f8;
+      --primary-color: #0288d1;
+      --error-color: #b42318;
     }
-    if(command==='configure'){
-      const config={mode:request.mode,retention_days:request.retention_days,max_storage_mb:request.max_storage_mb};
-      configs.set(request.entity_id,config);return config;
+    body {
+      margin: 0;
+      background: var(--primary-background-color);
     }
-    const item=items.find(row=>row.id===request.recording_id&&row.entity_id===request.entity_id);
-    if(!item)throw new Error('Recording does not belong to that station');
-    if(command==='get')return {item:structuredClone(item),audio_base64:toneWav()};
-    if(command==='label'){item.label=request.label;item.word_present=request.word_present;return structuredClone(item);}
-    if(command==='delete'){items=items.filter(row=>row!==item);return {deleted:true};}
-    throw new Error('Unexpected command');
-  }};
-  document.querySelector('voice-satellite-recordings-panel').hass=hass;
-  document.querySelector('#fail').onclick=()=>{fail=true;status('Next request will fail');};
-  document.querySelector('#empty').onclick=()=>{items=[];document.querySelector('voice-satellite-recordings-panel')._review.refresh();};
-</script>
+    .fixture {
+      padding: 12px 20px;
+      background: #e6f4fc;
+      font-size: 14px;
+      line-height: 1.5;
+      color: #17212b;
+    }
+    .fixture button {
+      font: inherit;
+      padding: 8px;
+      margin: 4px;
+    }
+  </style>
+  <div class="fixture">
+    Local fixture: actual review page, two stations, 31 generated clips. No microphone, device
+    assignment, or Home Assistant connection. Playback is a quiet generated tone.
+    <button id="fail">Fail next request</button><button id="empty">Empty inbox</button
+    ><span id="status" role="status"></span>
+  </div>
+  <voice-satellite-recordings-panel></voice-satellite-recordings-panel>
+  <script type="module">
+    import '../src/recordings/page.js';
+    const stations = [
+      { entity_id: 'assist_satellite.kitchen', name: 'Kitchen tablet' },
+      { entity_id: 'assist_satellite.office', name: 'Office tablet' },
+    ];
+    const configs = new Map(
+      stations.map((station) => [
+        station.entity_id,
+        { mode: 'review', retention_days: 7, max_storage_mb: 250 },
+      ])
+    );
+    let items = Array.from({ length: 31 }, (_, i) => ({
+      id: crypto.randomUUID(),
+      entity_id: stations[i % 2].entity_id,
+      station_name: stations[i % 2].name,
+      label: ['unreviewed', 'correct', 'false_trigger'][i % 3],
+      word_present: 'uncertain',
+      created_at: new Date(Date.now() - i * 60000).toISOString(),
+      metadata: { engine: 'openWakeWord', model: 'Atlas', capture_kind: 'wake', origin: 'native' },
+    }));
+    let fail = false;
+    const status = (text) => {
+      document.querySelector('#status').textContent = text;
+    };
+    function toneWav() {
+      const n = 8000,
+        buffer = new ArrayBuffer(44 + n * 2),
+        view = new DataView(buffer);
+      const text = (offset, s) =>
+        [...s].forEach((c, i) => view.setUint8(offset + i, c.charCodeAt(0)));
+      text(0, 'RIFF');
+      view.setUint32(4, 36 + n * 2, true);
+      text(8, 'WAVE');
+      text(12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, 16000, true);
+      view.setUint32(28, 32000, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      text(36, 'data');
+      view.setUint32(40, n * 2, true);
+      for (let i = 0; i < n; i++)
+        view.setInt16(
+          44 + i * 2,
+          Math.round(Math.sin((2 * Math.PI * 220 * i) / 16000) * 900),
+          true
+        );
+      return btoa(String.fromCharCode(...new Uint8Array(buffer)));
+    }
+    const hass = {
+      user: { is_admin: true },
+      async callWS(request) {
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        if (fail) {
+          fail = false;
+          throw new Error('Simulated connection failure. Refresh to retry.');
+        }
+        const command = request.type.split('/').pop();
+        status(`${command} · ${request.entity_id || 'All stations'}`);
+        if (command === 'review_list') {
+          const filtered = items.filter(
+            (item) =>
+              (!request.entity_id || request.entity_id === item.entity_id) &&
+              (!request.label || item.label === request.label)
+          );
+          return {
+            items: structuredClone(filtered.slice(request.offset, request.offset + request.limit)),
+            total: filtered.length,
+            stations,
+            config: request.entity_id ? configs.get(request.entity_id) : null,
+          };
+        }
+        if (command === 'configure') {
+          const config = {
+            mode: request.mode,
+            retention_days: request.retention_days,
+            max_storage_mb: request.max_storage_mb,
+          };
+          configs.set(request.entity_id, config);
+          return config;
+        }
+        const item = items.find(
+          (row) => row.id === request.recording_id && row.entity_id === request.entity_id
+        );
+        if (!item) throw new Error('Recording does not belong to that station');
+        if (command === 'get') return { item: structuredClone(item), audio_base64: toneWav() };
+        if (command === 'label') {
+          item.label = request.label;
+          item.word_present = request.word_present;
+          return structuredClone(item);
+        }
+        if (command === 'delete') {
+          items = items.filter((row) => row !== item);
+          return { deleted: true };
+        }
+        throw new Error('Unexpected command');
+      },
+    };
+    document.querySelector('voice-satellite-recordings-panel').hass = hass;
+    document.querySelector('#fail').onclick = () => {
+      fail = true;
+      status('Next request will fail');
+    };
+    document.querySelector('#empty').onclick = () => {
+      items = [];
+      document.querySelector('voice-satellite-recordings-panel')._review.refresh();
+    };
+  </script>
 </html>

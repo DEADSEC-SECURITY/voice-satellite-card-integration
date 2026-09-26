@@ -2028,7 +2028,9 @@ class VoiceSatellitePanel extends HTMLElement {
     `;
 
     // Set up menu button (HA built-in, handles sidebar toggle)
-    this.querySelector(`.${P}-recordings-link`)?.addEventListener('click', event => navigateReviewLink(event, '/voice-satellite-recordings'));
+    this.querySelector(`.${P}-recordings-link`)?.addEventListener('click', (event) => {
+      navigateReviewLink(event, '/voice-satellite-recordings');
+    });
     const menuBtn = this.querySelector(`.${P}-menu-btn`);
     if (menuBtn) {
       menuBtn.hass = this._hass;

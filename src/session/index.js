@@ -504,7 +504,11 @@ export class VoiceSatelliteSession {
   teardown() {
     this._logger.log('session', 'Tearing down session');
     this._recordings.stop();
-    try { this._teardownNativeWake?.(); } catch (e) { this._logger.log('session', `native wake teardown: ${e.message || e}`); }
+    try {
+      this._teardownNativeWake?.();
+    } catch (error) {
+      this._logger.log('session', `native wake teardown: ${error.message || error}`);
+    }
     if (this._imageLingerTimeout) {
       clearTimeout(this._imageLingerTimeout);
       this._imageLingerTimeout = null;
@@ -544,7 +548,9 @@ export class VoiceSatelliteSession {
     this._uiProxy.hideBar();
     this._uiProxy.showStartButton();
     this._toast.show({
-      id: 'session.in-use', severity: 'warn', category: 'Station already running',
+      id: 'session.in-use',
+      severity: 'warn',
+      category: 'Station already running',
       description: 'This station is active on another device. Open Wake recordings to review its clips. To move the station here, stop it on the other device first, then press Start.',
     });
   }

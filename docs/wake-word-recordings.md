@@ -133,7 +133,7 @@ Keep recordings from the same source session together when later preparing
 training and evaluation datasets. A fresh recording is needed to test a model
 after it has learned from these examples.
 
-## Trial checklist
+## Device testing checklist
 
 1. Enable **Save** and verify a deliberate wake produces one playable saved clip.
 2. Confirm the normal voice request and response still work without waiting for
@@ -161,3 +161,30 @@ and feedback controller against a local fixture server object; **Preview feedbac
 popup** opens the touch flow. `tools/recordings-inbox-preview.html` exercises the
 standalone inbox. Serve the repository over localhost and open either file. All
 fixture audio is generated; neither connects to HA or opens a microphone.
+
+## Frontend maintenance
+
+The recording feature lives in `src/recordings/`:
+
+- `capture.js` owns sample history and WAV encoding.
+- `index.js` owns recording policy, native configuration, and the upload queue.
+- `panel.js` owns the inbox, per-recording review drafts, playback, and export.
+  Its rendering methods build settings, filters, recording rows, and pagination
+  separately from requests and save state.
+- `review.js` owns the timed feedback prompt and its two-step form. Form callbacks
+  retain their original prompt identity so late responses cannot replace a newer
+  prompt.
+- `page.js` mounts the standalone Home Assistant review page.
+- `dom.js` contains the small shared DOM helpers; `styles.js` contains scoped,
+  readable CSS for the panel, page, and feedback prompt. These remain JavaScript
+  modules so the same UI can run directly in the local preview pages.
+
+Run `npm run format:recordings` after editing this feature. CI runs
+`npm run check:recordings-format`, `npm test`, and `npm run build`. Formatting is
+limited to the recording modules, their tests, and the two preview pages.
+
+Keep review intent and acoustic word presence separate. Preserve the request and
+view revision checks around asynchronous work: a late response must never update
+another station's view. Native settings only count as applied after the app
+acknowledges them, and native clips are acknowledged only after Home Assistant
+has saved them.

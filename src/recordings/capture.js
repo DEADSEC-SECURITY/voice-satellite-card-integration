@@ -18,35 +18,53 @@ export class PcmCaptureRing {
   }
 
   append(samples) {
-    const initial = Math.max(0, samples.length - this.samples.length);
-    for (let i = initial; i < samples.length; i++) {
+    const firstRetainedIndex = Math.max(0, samples.length - this.samples.length);
+    for (let i = firstRetainedIndex; i < samples.length; i++) {
       const value = samples[i];
       this.samples[(this.total + i) % this.samples.length] = Number.isFinite(value) ? value : 0;
-      if (!Number.isFinite(value)) this.lastGap = this.total + i;
+      if (!Number.isFinite(value)) {
+        this.lastGap = this.total + i;
+      }
     }
     this.total += samples.length;
     return { end: this.total, generation: this.generation };
   }
 
   markGap(marker) {
-    if (!marker) this.lastGap = this.total;
-    else if (marker.generation === this.generation) this.lastGap = marker.end - 1;
+    if (!marker) {
+      this.lastGap = this.total;
+    } else if (marker.generation === this.generation) {
+      this.lastGap = marker.end - 1;
+    }
   }
 
   snapshot(marker = { end: this.total, generation: this.generation }, seconds = 5) {
-    if (!marker || marker.generation !== this.generation || !Number.isInteger(marker.end)
-        || marker.end > this.total || marker.end <= 0) return null;
-    const oldest = Math.max(0, this.total - this.samples.length);
+    if (
+      !marker ||
+      marker.generation !== this.generation ||
+      !Number.isInteger(marker.end) ||
+      marker.end > this.total ||
+      marker.end <= 0
+    ) {
+      return null;
+    }
+    const oldestAvailableSample = Math.max(0, this.total - this.samples.length);
     // An inference frame older than our history must never capture newer audio.
-    if (marker.end <= oldest) return null;
-    const wanted = Math.max(0, marker.end - Math.round(seconds * SAMPLE_RATE));
-    const start = Math.max(wanted, oldest);
-    const count = marker.end - start;
+    if (marker.end <= oldestAvailableSample) {
+      return null;
+    }
+    const requestedStart = Math.max(0, marker.end - Math.round(seconds * SAMPLE_RATE));
+    const firstSample = Math.max(requestedStart, oldestAvailableSample);
+    const count = marker.end - firstSample;
     const output = new Float32Array(count);
-    for (let i = 0; i < count; i++) output[i] = this.samples[(start + i) % this.samples.length];
+    for (let i = 0; i < count; i++) {
+      output[i] = this.samples[(firstSample + i) % this.samples.length];
+    }
     return {
-      wav: encodeWav(output), count,
-      discontinuity: start > wanted || (this.lastGap >= start && this.lastGap < marker.end),
+      wav: encodeWav(output),
+      count,
+      discontinuity:
+        firstSample > requestedStart || (this.lastGap >= firstSample && this.lastGap < marker.end),
     };
   }
 }
@@ -54,13 +72,25 @@ export class PcmCaptureRing {
 export function encodeWav(samples) {
   const bytes = new Uint8Array(44 + samples.length * 2);
   const view = new DataView(bytes.buffer);
-  const ascii = (offset, value) => { for (let i = 0; i < value.length; i++) bytes[offset + i] = value.charCodeAt(i); };
-  ascii(0, 'RIFF'); view.setUint32(4, bytes.length - 8, true);
-  ascii(8, 'WAVE'); ascii(12, 'fmt '); view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true); view.setUint16(22, 1, true);
-  view.setUint32(24, SAMPLE_RATE, true); view.setUint32(28, SAMPLE_RATE * 2, true);
-  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
-  ascii(36, 'data'); view.setUint32(40, samples.length * 2, true);
+  const writeAscii = (offset, value) => {
+    for (let i = 0; i < value.length; i++) {
+      bytes[offset + i] = value.charCodeAt(i);
+    }
+  };
+  // RIFF/WAVE header for mono, 16-bit little-endian PCM at the detector's rate.
+  writeAscii(0, 'RIFF');
+  view.setUint32(4, bytes.length - 8, true);
+  writeAscii(8, 'WAVE');
+  writeAscii(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, SAMPLE_RATE, true);
+  view.setUint32(28, SAMPLE_RATE * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
   for (let i = 0; i < samples.length; i++) {
     const value = Number.isFinite(samples[i]) ? samples[i] : 0;
     view.setInt16(44 + i * 2, Math.max(-32768, Math.min(32767, Math.round(value * 32768))), true);
@@ -77,7 +107,9 @@ export function toBase64(bytes) {
 }
 
 export function captureId() {
-  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  if (globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID();
+  }
   const bytes = new Uint8Array(16);
   globalThis.crypto.getRandomValues(bytes);
   bytes[6] = (bytes[6] & 15) | 64;

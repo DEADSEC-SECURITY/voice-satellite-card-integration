@@ -249,15 +249,21 @@ async function _startListeningBody(session) {
   session._starting = true;
   const startingEntity = session.config.satellite_entity;
   const checkEntity = () => {
-    if (startingEntity !== session.config.satellite_entity) throw new Error('Satellite selection changed during startup');
+    if (startingEntity !== session.config.satellite_entity) {
+      throw new Error('Satellite selection changed during startup');
+    }
   };
 
   try {
     // Reserve the station before native wake, the mic or recording can start.
     // Event subscription is the runtime claim, not a passive review feed.
-    const claimed = await subscribeSatelliteEvents(session, (event) => dispatchSatelliteEvent(session, event));
+    const claimed = await subscribeSatelliteEvents(session, (event) => {
+      dispatchSatelliteEvent(session, event);
+    });
     checkEntity();
-    if ((!claimed && !session._runtimeClaimed) || session._userStopped) return 'aborted';
+    if ((!claimed && !session._runtimeClaimed) || session._userStopped) {
+      return 'aborted';
+    }
     session.recordings?.update();
 
     // Kiosk Satellite: if we're hosted in the app and it can run the selected

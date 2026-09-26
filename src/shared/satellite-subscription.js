@@ -188,7 +188,11 @@ function _doSubscribe(card, connection, onEvent) {
       // Teardown on the same socket: release a late subscription. Across a
       // reconnect, never send an old message id into the new id-space.
       if (socketGeneration === _socketGeneration) {
-        try { Promise.resolve(unsub()).catch(() => {}); } catch (_) { /* cleanup */ }
+        try {
+          Promise.resolve(unsub()).catch(() => {});
+        } catch (_) {
+          // A connection already being torn down may reject its cleanup.
+        }
       }
       return false;
     }
